@@ -84,12 +84,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       `Dialogue: 0,${assTime(c.start)},${assTime(c.end)},Caption,,0,0,0,,{\\fscx80\\fscy80\\t(0,80,\\fscx100\\fscy100)${color}}${text}`,
     );
   }
-  // Pop-up stickers: tilted yellow labels that overshoot then settle.
+  // Pop-up stickers: tilted yellow labels that overshoot then settle. They sit
+  // near the top, above the creator's head and below the TikTok header, and
+  // take the hook's spot once the hook is gone.
   (opts.stickers ?? []).forEach((s, i) => {
     const tilt = i % 2 === 0 ? -4 : 3;
     const pop = "\\fscx40\\fscy40\\t(0,120,\\fscx112\\fscy112)\\t(120,200,\\fscx100\\fscy100)";
     lines.push(
-      `Dialogue: 3,${assTime(s.start)},${assTime(s.end)},Sticker,,0,0,0,,{\\an5\\pos(540,760)\\frz${tilt}${pop}}${assText(s.text.toUpperCase())}`,
+      `Dialogue: 3,${assTime(s.start)},${assTime(s.end)},Sticker,,0,0,0,,{\\an5\\pos(540,330)\\frz${tilt}${pop}}${assText(s.text.toUpperCase())}`,
     );
   });
   if (opts.aiLabel) {
