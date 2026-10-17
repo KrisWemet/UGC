@@ -1,0 +1,480 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { buildAss } from "./captions";
+import { config } from "./config";
+import { buildComposeArgs, FONTS_DIR, mediaDuration, runFfmpeg, type Shot } from "./ffmpeg";
+import type { RenderJob } from "./job";
+import { createTask, getTask } from "./kie";
+import { downloadBuffer, safeFetch } from "./safe-fetch";
+import { storeVideo } from "./storage";
+import { whisperAlignEnabled, whisperWords } from "./align";
+import { fallbackGeminiVoice, parseVoice } from "./voices";
+import { estimateWordTimings, joinNarration, parseWordTimestamps, segmentTimings } from "./timing";
+
+// Advances a render job by one step: starts tasks that are ready to start,
+// polls running ones, and composes the final video once every asset exists.
+// Each call is short except the final compose, so it fits serverless limits.
+
+const VOICE_STYLE =
+  "A real person in their twenties casually telling a friend about something they just found, speaking to their phone camera. Natural, upbeat and quick, with genuine enthusiasm; not an announcer.";
+
+const AVATAR_PROMPT =
+  "A natural UGC creator talking to the camera in a casual home setting. Relaxed, expressive, subtle hand gestures and head movement, natural blinking, steady eye contact.";
+
+function log(job: RenderJob, message: string) {
+  job.log = [...job.log, `${new Date().toISOString().slice(11, 19)} ${message}`].slice(-200);
+}
+
+function actorPrompt(description: string) {
+  return `Vertical smartphone selfie video still of ${description}, looking straight at the camera with a relaxed, friendly expression, upper body framed in the center, sitting in a lived-in apartment with soft window light. Candid and real, not a model shoot. No text.`;
+}
+
+const MAX_ATTEMPTS = 3;
+
+// A failed task is started again (up to MAX_ATTEMPTS) before failing the job.
+function retryOrFail(job: RenderJob, ref: { taskId: string | null; attempts: number }, what: string, error: string | null) {
+  ref.attempts += 1;
+  if (ref.attempts >= MAX_ATTEMPTS) throw new Error(`${what} failed after ${ref.attempts} attempts: ${error}`);
+  ref.taskId = null;
+  log(job, `${what} failed (${error}); retrying.`);
+}
+
+function firstUrl(urls: string[], what: string): string {
+  if (!urls[0]) throw new Error(`${what} finished but returned no file.`);
+  return urls[0];
+}
+
+async function stepVoice(job: RenderJob) {
+  const { text, wordStarts, wordCount } = joinNarration(job.script.segments);
+  const { provider, voice } = parseVoice(job.voiceId);
+  if (!job.voice.taskId) {
+    job.voice.taskId =
+      provider === "gemini"
+        ? await createTask(config.kie.geminiTts, {
+            speakers: [{ speaker_id: "Speaker 1", voice_name: voice }],
+            dialogue_turns: [{ speaker_id: "Speaker 1", style: VOICE_STYLE, text }],
+          })
+        : await createTask(config.kie.tts, {
+            text,
+            voice,
+            stability: 0.45,
+            similarity_boost: 0.75,
+            style: 0.35,
+            speed: 1.05,
+            timestamps: true,
+          });
+    log(job, `Voiceover started (${provider === "gemini" ? "Google" : "ElevenLabs"} ${voice}).`);
+    return;
+  }
+  if (job.voice.url) return;
+  const task = await getTask(job.voice.taskId);
+  if (task.state === "fail" && provider === "elevenlabs") {
+    // ElevenLabs on kie.ai has outages; switch to a Google voice instead of failing.
+    job.voiceId = fallbackGeminiVoice(job.script.actorDescription);
+    job.voice.taskId = null;
+    log(job, `ElevenLabs voiceover failed (${task.error}); switching to Google voice ${parseVoice(job.voiceId).voice}.`);
+    return;
+  }
+  if (task.state === "fail") return retryOrFail(job, job.voice, "Voiceover", task.error);
+  if (task.state !== "success") return;
+
+  const audioUrl =
+    task.urls[0] ?? (typeof task.result?.audio_url === "string" ? (task.result.audio_url as string) : null);
+  if (!audioUrl) throw new Error("Voiceover finished but returned no audio file.");
+
+  const dir = await mkdtemp(path.join(tmpdir(), "ugc-voice-"));
+  try {
+    const file = path.join(dir, "voice.audio");
+    await writeFile(file, await downloadBuffer(audioUrl, 50 * 1024 * 1024));
+    const duration = await mediaDuration(file);
+    let parsed = parseWordTimestamps(task.result);
+    if (!parsed && whisperAlignEnabled()) {
+      parsed = await whisperWords(file).catch((err) => {
+        log(job, `Whisper alignment failed (${err instanceof Error ? err.message : err}); estimating caption timing.`);
+        return null;
+      });
+    }
+    const words = parsed ?? estimateWordTimings(text, duration);
+    job.voice = {
+      ...job.voice,
+      url: audioUrl,
+      duration,
+      words,
+      segments: segmentTimings(
+        words,
+        wordStarts,
+        wordCount,
+        duration,
+        job.script.segments.map((seg) => seg.narration.trim().split(/\s+/)[0] ?? ""),
+      ),
+      timestampsEstimated: !parsed,
+    };
+    log(job, `Voiceover ready (${duration.toFixed(1)}s${parsed ? "" : ", caption timing estimated"}).`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function stepActor(job: RenderJob) {
+  if (job.mode !== "actor" || job.actor.url) return;
+  if (!job.actor.taskId) {
+    job.actor.taskId = await createTask(config.kie.image, {
+      prompt: actorPrompt(job.script.actorDescription),
+      aspect_ratio: "9:16",
+      size: "1.5K",
+      output_format: "png",
+    });
+    log(job, "Actor portrait started.");
+    return;
+  }
+  const task = await getTask(job.actor.taskId);
+  if (task.state === "fail") return retryOrFail(job, job.actor, "Actor portrait", task.error);
+  if (task.state === "success") {
+    job.actor.url = firstUrl(task.urls, "Actor portrait");
+    log(job, "Actor portrait ready.");
+  }
+}
+
+// The product shot the creator should hold: a real site image if there is
+// one, otherwise the first generated demo image.
+export function productVisual(job: RenderJob) {
+  const ready = job.visuals.filter((v) => v.url);
+  return (
+    ready.find((v) => v.source === "site") ??
+    ready.find((v) => job.script.segments[v.segment].kind === "demo") ??
+    null
+  );
+}
+
+const HOLDING_PROMPT =
+  "Image 1 is a person, image 2 is a product. Recreate image 1 exactly: the same person, face, hair, clothes, room, lighting, framing and camera angle. The only change: they casually hold the product from image 2 in one hand at chest height, tilted toward the camera so it is clearly visible, with a natural grip. Keep it a candid vertical phone selfie. Do not add any text or logos.";
+
+async function stepHolding(job: RenderJob) {
+  const holding = job.holding;
+  if (job.mode !== "actor" || !job.productInHand || holding.skipped || holding.url || !job.actor.url) return;
+  if (!holding.taskId) {
+    const product = productVisual(job);
+    if (!product) {
+      // Wait for a demo image, unless every visual is done and none fits.
+      if (job.visuals.every((v) => v.url)) holding.skipped = true;
+      return;
+    }
+    holding.taskId = await createTask(config.kie.imageEdit, {
+      prompt: HOLDING_PROMPT,
+      image_urls: [job.actor.url, product.url],
+      output_format: "png",
+      aspect_ratio: "9:16",
+    });
+    log(job, "Putting the product in the creator's hand.");
+    return;
+  }
+  const task = await getTask(holding.taskId);
+  if (task.state === "fail") {
+    holding.attempts += 1;
+    holding.taskId = null;
+    if (holding.attempts >= 2) {
+      holding.skipped = true;
+      log(job, `Couldn't put the product in the creator's hand (${task.error}); using the plain portrait.`);
+    }
+    return;
+  }
+  if (task.state === "success") {
+    holding.url = firstUrl(task.urls, "Product-in-hand portrait");
+    log(job, "Creator is now holding the product.");
+  }
+}
+
+async function stepHead(job: RenderJob) {
+  if (job.mode !== "actor" || job.head.url || !job.actor.url || !job.voice.url) return;
+  // Wait for the product-in-hand portrait unless it was skipped.
+  const holdingPending = job.productInHand && !job.holding.skipped && !job.holding.url;
+  if (holdingPending) return;
+  if (!job.head.taskId) {
+    const premium = job.quality === "premium";
+    job.head.taskId = await createTask(premium ? config.kie.avatarPremium : config.kie.avatarBudget, {
+      image_url: job.holding.url ?? job.actor.url,
+      audio_url: job.voice.url,
+      prompt: AVATAR_PROMPT,
+      ...(premium ? {} : { resolution: "720p" }),
+    });
+    log(job, `Talking-head video started (${premium ? "Kling Avatar" : "Infinitalk"}). This usually takes a few minutes.`);
+    return;
+  }
+  const task = await getTask(job.head.taskId);
+  if (task.state === "fail") {
+    retryOrFail(job, job.head, "Talking-head video", task.error);
+    // kie.ai models have separate outages, so retry on the other avatar model.
+    job.quality = job.quality === "premium" ? "budget" : "premium";
+    return;
+  }
+  if (task.state === "success") {
+    job.head.url = firstUrl(task.urls, "Talking-head video");
+    log(job, "Talking-head video ready.");
+  }
+}
+
+async function siteImageReachable(url: string): Promise<boolean> {
+  try {
+    const res = await safeFetch(url, { timeoutMs: 15_000 });
+    const type = res.headers.get("content-type") ?? "";
+    await res.body?.cancel();
+    return res.ok && /^image\/(png|jpe?g|webp)/.test(type);
+  } catch {
+    return false;
+  }
+}
+
+async function stepVisual(job: RenderJob, visual: RenderJob["visuals"][number]) {
+  if (visual.url) return;
+  const segment = job.script.segments[visual.segment];
+  if (visual.source === "site" && !visual.taskId) {
+    const image = segment.siteImageIndex !== null ? job.siteImages[segment.siteImageIndex] : undefined;
+    if (image && (await siteImageReachable(image.url))) {
+      visual.url = image.url;
+      return;
+    }
+    visual.source = "generated";
+    log(job, `Site image for segment ${visual.segment + 1} unavailable; generating one instead.`);
+  }
+  if (!visual.taskId) {
+    visual.taskId = await createTask(config.kie.image, {
+      prompt: `${segment.imagePrompt}. Photorealistic, natural light, shot on a phone, vertical framing, no text or logos.`,
+      aspect_ratio: "9:16",
+      size: "1.5K",
+      output_format: "jpeg",
+    });
+    return;
+  }
+  const task = await getTask(visual.taskId);
+  if (task.state === "fail") return retryOrFail(job, visual, `Image for segment ${visual.segment + 1}`, task.error);
+  if (task.state === "success") visual.url = firstUrl(task.urls, "Image");
+}
+
+const CLIP_PROMPT =
+  "Natural, realistic motion: subtle handheld phone camera movement and gentle movement in the scene. Keep the composition and subject. No text, no logos, no cuts.";
+
+// Animates a b-roll still into a short clip. Optional: if it fails, the still
+// is used with a slow zoom instead.
+async function stepClip(job: RenderJob, visual: RenderJob["visuals"][number]) {
+  const clip = visual.clip;
+  if (!job.motion || clip.skipped || clip.url || !visual.url) return;
+  if (!clip.taskId) {
+    const segment = job.script.segments[visual.segment];
+    clip.taskId = await createTask(config.kie.imageToVideo, {
+      prompt: `${CLIP_PROMPT} Scene: ${segment.imagePrompt ?? segment.narration}`,
+      image_url: visual.url,
+      duration: "6",
+      resolution: "768P",
+    });
+    return;
+  }
+  const task = await getTask(clip.taskId);
+  if (task.state === "fail") {
+    clip.attempts += 1;
+    clip.taskId = null;
+    if (clip.attempts >= 2) {
+      clip.skipped = true;
+      log(job, `Couldn't animate segment ${visual.segment + 1} (${task.error}); using the still image.`);
+    }
+    return;
+  }
+  if (task.state === "success") {
+    clip.url = firstUrl(task.urls, "B-roll clip");
+    log(job, `B-roll clip for segment ${visual.segment + 1} ready.`);
+  }
+}
+
+const MUSIC_PROMPT =
+  "Upbeat, bouncy instrumental background beat for a casual TikTok creator video. Warm, modern, light drums, no vocals, steady energy that sits under speech.";
+
+// Background music. Optional: skipped if it fails.
+async function stepTrack(job: RenderJob) {
+  const track = job.track;
+  if (!job.music || track.skipped || track.url) return;
+  if (!track.taskId) {
+    track.taskId = await createTask(config.kie.music, {
+      custom_mode: false,
+      instrumental: true,
+      model: "V6_MINI",
+      prompt: MUSIC_PROMPT,
+    });
+    log(job, "Background music started.");
+    return;
+  }
+  const task = await getTask(track.taskId);
+  if (task.state === "fail") {
+    track.skipped = true;
+    log(job, `Background music failed (${task.error}); continuing without it.`);
+    return;
+  }
+  if (task.state === "success") {
+    track.url = firstUrl(task.urls, "Background music");
+    log(job, "Background music ready.");
+  }
+}
+
+// Long talking-head stretches are split into ~2s shots that alternate between
+// a normal frame and a punch-in, the jump-cut rhythm of UGC edits.
+export function splitForJumpCuts(start: number, end: number, target = 2.2): { start: number; end: number }[] {
+  const parts = Math.max(1, Math.round((end - start) / target));
+  const step = (end - start) / parts;
+  return Array.from({ length: parts }, (_, i) => ({ start: start + i * step, end: i === parts - 1 ? end : start + (i + 1) * step }));
+}
+
+// Transitions used where the video moves between the creator and b-roll (or
+// between two b-roll shots); cuts within the creator's footage stay hard.
+const TRANSITIONS = ["smoothleft", "slideup", "smoothright", "smoothup", "slideleft", "smoothdown"];
+
+export function buildShots(
+  job: RenderJob,
+  images: Map<number, string>,
+  clips: Map<number, string> = new Map(),
+): Shot[] {
+  const shots = buildCuts(job, images, clips);
+  let n = 0;
+  shots.forEach((shot, i) => {
+    const prev = shots[i - 1];
+    if (prev && (shot.kind !== "video" || prev.kind !== "video") && shot.end - shot.start > 0.6 && prev.end - prev.start > 0.6) {
+      shot.transition = TRANSITIONS[n++ % TRANSITIONS.length];
+    }
+  });
+  return shots;
+}
+
+function buildCuts(job: RenderJob, images: Map<number, string>, clips: Map<number, string>): Shot[] {
+  const segments = job.voice.segments!;
+  let punch = false;
+  return job.script.segments.flatMap((seg, i): Shot[] => {
+    const { start, end } = segments[i];
+    if (seg.shot === "actor" && job.mode === "actor") {
+      return splitForJumpCuts(start, end).map((part) => {
+        punch = !punch;
+        return { kind: "video" as const, ...part, zoom: punch ? 1 : 1.18 };
+      });
+    }
+    const clip = clips.get(i);
+    if (clip) return [{ kind: "clip" as const, start, end, file: clip }];
+    const file = images.get(i);
+    if (!file) throw new Error(`Missing image for segment ${i + 1}.`);
+    return [{ kind: "image" as const, start, end, file }];
+  });
+}
+
+export function buildStickers(job: RenderJob) {
+  const segments = job.voice.segments!;
+  return job.script.segments.flatMap((seg, i) => {
+    const text = seg.onScreenText?.trim();
+    if (!text || i === 0) return [];
+    const { start, end } = segments[i];
+    return [{ text, start: start + 0.15, end: Math.min(end - 0.05, start + 2) }];
+  });
+}
+
+async function compose(job: RenderJob) {
+  const dir = await mkdtemp(path.join(tmpdir(), "ugc-render-"));
+  try {
+    log(job, "Composing the final video...");
+    const audioFile = path.join(dir, "voice.audio");
+    await writeFile(audioFile, await downloadBuffer(job.voice.url!, 50 * 1024 * 1024));
+
+    let talkingHeadFile: string | undefined;
+    if (job.mode === "actor") {
+      talkingHeadFile = path.join(dir, "head.mp4");
+      await writeFile(talkingHeadFile, await downloadBuffer(job.head.url!));
+    }
+
+    const images = new Map<number, string>();
+    const clips = new Map<number, string>();
+    await Promise.all(
+      job.visuals.map(async (v) => {
+        if (v.clip.url) {
+          const file = path.join(dir, `clip-${v.segment}.mp4`);
+          await writeFile(file, await downloadBuffer(v.clip.url));
+          clips.set(v.segment, file);
+          return;
+        }
+        const file = path.join(dir, `visual-${v.segment}.img`);
+        await writeFile(file, await downloadBuffer(v.url!, 30 * 1024 * 1024));
+        images.set(v.segment, file);
+      }),
+    );
+
+    let musicFile: string | undefined;
+    if (job.track.url) {
+      musicFile = path.join(dir, "music.audio");
+      await writeFile(musicFile, await downloadBuffer(job.track.url, 30 * 1024 * 1024));
+    }
+
+    const duration = job.voice.duration!;
+    const assFile = path.join(dir, "captions.ass");
+    await writeFile(
+      assFile,
+      buildAss({
+        words: job.voice.words!,
+        hookText: job.script.hookText,
+        hookEnd: Math.min(job.voice.segments![0].end, 3.5),
+        duration,
+        aiLabel: job.aiLabel,
+        stickers: buildStickers(job),
+      }),
+    );
+
+    const outFile = path.join(dir, "final.mp4");
+    await runFfmpeg(
+      buildComposeArgs({
+        shots: buildShots(job, images, clips),
+        audioFile,
+        musicFile,
+        talkingHeadFile,
+        assFile,
+        fontsDir: FONTS_DIR,
+        duration,
+        outFile,
+      }),
+    );
+
+    const slug = job.script.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40) || "video";
+    job.final = await storeVideo(await readFile(outFile), `${slug}-${job.id.slice(0, 8)}.mp4`);
+    job.status = "done";
+    log(job, "Done.");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+export function assetsReady(job: RenderJob): boolean {
+  return (
+    !!job.voice.url &&
+    job.visuals.every((v) => v.url && (!job.motion || v.clip.url || v.clip.skipped)) &&
+    (!job.music || !!job.track.url || job.track.skipped) &&
+    (job.mode === "faceless" || (!!job.actor.url && !!job.head.url))
+  );
+}
+
+export async function advance(input: RenderJob): Promise<RenderJob> {
+  const job: RenderJob = structuredClone(input);
+  if (job.status !== "running") return job;
+  try {
+    await Promise.all([
+      stepVoice(job),
+      stepActor(job),
+      stepTrack(job),
+      ...job.visuals.map((v) => stepVisual(job, v).then(() => stepClip(job, v))),
+    ]);
+    await stepHolding(job);
+    await stepHead(job);
+    if (assetsReady(job)) await compose(job);
+  } catch (err) {
+    // Network blips and timeouts while polling shouldn't kill a job whose
+    // tasks are still running at kie.ai; the next step retries them.
+    if (err instanceof Error && (err.name === "TimeoutError" || (err instanceof TypeError && err.message === "fetch failed"))) {
+      log(job, `Network error, will retry: ${err.message}`);
+      return job;
+    }
+    job.status = "failed";
+    job.error = err instanceof Error ? err.message : String(err);
+    log(job, `Failed: ${job.error}`);
+  }
+  return job;
+}
