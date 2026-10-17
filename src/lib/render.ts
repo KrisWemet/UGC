@@ -311,7 +311,7 @@ export function splitForJumpCuts(start: number, end: number, target = 2.2): { st
 
 // Transitions used where the video moves between the creator and b-roll (or
 // between two b-roll shots); cuts within the creator's footage stay hard.
-const TRANSITIONS = ["smoothleft", "zoomin", "slideup", "smoothright", "circleopen", "slidedown"];
+const TRANSITIONS = ["smoothleft", "slideup", "smoothright", "smoothup", "slideleft", "smoothdown"];
 
 export function buildShots(
   job: RenderJob,
