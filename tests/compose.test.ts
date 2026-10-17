@@ -15,10 +15,14 @@ describe("compose", () => {
     const img1 = path.join(dir, "a.png");
     const img2 = path.join(dir, "b.jpg");
     const audio = path.join(dir, "voice.mp3");
+    const clip = path.join(dir, "clip.mp4");
+    const music = path.join(dir, "music.mp3");
     await runFfmpeg(["-f", "lavfi", "-i", "testsrc2=size=720x1280:rate=25:duration=9", "-pix_fmt", "yuv420p", head]);
     await runFfmpeg(["-f", "lavfi", "-i", "color=c=orange:size=1024x1536", "-frames:v", "1", img1]);
     await runFfmpeg(["-f", "lavfi", "-i", "color=c=teal:size=1600x900", "-frames:v", "1", img2]);
     await runFfmpeg(["-f", "lavfi", "-i", "sine=frequency=440:duration=9", "-c:a", "libmp3lame", audio]);
+    await runFfmpeg(["-f", "lavfi", "-i", "mandelbrot=size=432x768:rate=24", "-t", "1.2", "-pix_fmt", "yuv420p", clip]);
+    await runFfmpeg(["-f", "lavfi", "-i", "sine=frequency=220:duration=30", "-c:a", "libmp3lame", music]);
 
     const duration = await mediaDuration(audio);
     expect(duration).toBeGreaterThan(8.5);
@@ -27,7 +31,14 @@ describe("compose", () => {
     const ass = path.join(dir, "subs.ass");
     writeFileSync(
       ass,
-      buildAss({ words: estimateWordTimings(text, duration), hookText: "Wait for it", hookEnd: 2, duration, aiLabel: true }),
+      buildAss({
+        words: estimateWordTimings(text, duration),
+        hookText: "Wait for it",
+        hookEnd: 2,
+        duration,
+        aiLabel: true,
+        stickers: [{ text: "43g protein", start: 2.2, end: 4 }],
+      }),
     );
 
     const out = path.join(dir, "final.mp4");
@@ -36,11 +47,15 @@ describe("compose", () => {
         shots: [
           { kind: "video", start: 0, end: 2 },
           { kind: "image", start: 2, end: 4, file: img1 },
-          { kind: "video", start: 4, end: 6.5 },
-          { kind: "image", start: 6.5, end: 8, file: img2 },
-          { kind: "video", start: 8, end: duration },
+          { kind: "video", start: 4, end: 5.2, zoom: 1.18 },
+          { kind: "video", start: 5.2, end: 6.5 },
+          // Shorter than its slot: the last frame should hold.
+          { kind: "clip", start: 6.5, end: 8, file: clip },
+          { kind: "image", start: 8, end: 8.5, file: img2 },
+          { kind: "video", start: 8.5, end: duration, zoom: 1.18 },
         ],
         audioFile: audio,
+        musicFile: music,
         talkingHeadFile: head,
         assFile: ass,
         fontsDir: FONTS_DIR,

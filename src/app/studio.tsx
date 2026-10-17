@@ -46,6 +46,8 @@ export default function Studio() {
   const [count, setCount] = useState(3);
   const [voiceId, setVoiceId] = useState<string>(VOICES[0].id);
   const [aiLabel, setAiLabel] = useState(true);
+  const [motion, setMotion] = useState(true);
+  const [music, setMusic] = useState(true);
   const [busy, setBusy] = useState<"research" | "scripts" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<RenderJob[]>([]);
@@ -123,6 +125,8 @@ export default function Studio() {
         quality,
         voiceId,
         aiLabel,
+        motion,
+        music,
         script,
         siteImages: research.images,
       });
@@ -256,6 +260,14 @@ export default function Studio() {
               <input type="checkbox" checked={aiLabel} onChange={(e) => setAiLabel(e.target.checked)} />
               Show &quot;AI-generated&quot; label
             </label>
+            <label className="inline small">
+              <input type="checkbox" checked={motion} onChange={(e) => setMotion(e.target.checked)} />
+              Animated b-roll
+            </label>
+            <label className="inline small">
+              <input type="checkbox" checked={music} onChange={(e) => setMusic(e.target.checked)} />
+              Background music
+            </label>
           </div>
           <div className="grid">
             {scripts.map((script, si) => (
@@ -272,6 +284,7 @@ export default function Studio() {
                     <span className="tag">
                       {seg.shot === "actor" ? "creator on camera" : seg.siteImageIndex !== null ? "site image" : "generated image"}
                     </span>
+                    {seg.onScreenText && <span className="tag">pop-up: {seg.onScreenText}</span>}
                     <textarea value={seg.narration} onChange={(e) => editNarration(si, gi, e.target.value)} />
                   </div>
                 ))}

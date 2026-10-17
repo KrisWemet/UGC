@@ -15,9 +15,9 @@ const script: Script = {
   caption: "Try it #ad",
   hashtags: ["#ad"],
   segments: [
-    { kind: "hook", narration: "Okay stop doing this by hand.", shot: "actor", imagePrompt: null, siteImageIndex: null },
-    { kind: "problem", narration: "Spreadsheets everywhere, nothing adds up.", shot: "visual", imagePrompt: "messy desk", siteImageIndex: null },
-    { kind: "cta", narration: "Link in bio.", shot: "actor", imagePrompt: null, siteImageIndex: null },
+    { kind: "hook", narration: "Okay stop doing this by hand.", shot: "actor", imagePrompt: null, siteImageIndex: null, onScreenText: null },
+    { kind: "problem", narration: "Spreadsheets everywhere, nothing adds up.", shot: "visual", imagePrompt: "messy desk", siteImageIndex: null, onScreenText: null },
+    { kind: "cta", narration: "Link in bio.", shot: "actor", imagePrompt: null, siteImageIndex: null, onScreenText: null },
   ],
 };
 
@@ -166,5 +166,32 @@ describe("json replies", async () => {
     );
     expect(result).toEqual({ word: "joy" });
     expect(seen).toEqual([1, 3]);
+  });
+});
+
+describe("editing", async () => {
+  const { splitForJumpCuts, buildShots: shots, buildStickers } = await import("@/lib/render");
+  it("splits long talking-head stretches into ~2s shots", () => {
+    expect(splitForJumpCuts(0, 1.5)).toEqual([{ start: 0, end: 1.5 }]);
+    const parts = splitForJumpCuts(0, 6.6);
+    expect(parts).toHaveLength(3);
+    expect(parts.at(-1)!.end).toBe(6.6);
+  });
+  it("alternates punch-ins and prefers animated clips over stills", () => {
+    const job = newJob({ mode: "actor", quality: "budget", voiceId: "v", aiLabel: true, script, siteImages: [] });
+    job.voice.segments = [
+      { start: 0, end: 4.4 },
+      { start: 4.4, end: 7 },
+      { start: 7, end: 8 },
+    ];
+    job.script.segments[1].onScreenText = "No more spreadsheets";
+    const result = shots(job, new Map([[1, "/tmp/a.jpg"]]), new Map([[1, "/tmp/a.mp4"]]));
+    expect(result.map((s) => s.kind)).toEqual(["video", "video", "clip", "video"]);
+    expect(result.filter((s) => s.kind === "video").map((s) => (s as { zoom?: number }).zoom)).toEqual([1, 1.18, 1]);
+    const [sticker, ...rest] = buildStickers(job);
+    expect(rest).toEqual([]);
+    expect(sticker.text).toBe("No more spreadsheets");
+    expect(sticker.start).toBeCloseTo(4.55);
+    expect(sticker.end).toBeCloseTo(6.4);
   });
 });

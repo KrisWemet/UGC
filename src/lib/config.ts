@@ -14,6 +14,10 @@ export const config = {
     // "premium" talking head (Kling Avatar) and "budget" (Infinitalk).
     avatarPremium: process.env.KIE_AVATAR_MODEL ?? "kling/ai-avatar-standard",
     avatarBudget: process.env.KIE_AVATAR_BUDGET_MODEL ?? "infinitalk/from-audio",
+    // Animates b-roll stills into short clips.
+    imageToVideo: process.env.KIE_IMG2VIDEO_MODEL ?? "hailuo/2-3-image-to-video-standard",
+    // Instrumental background music (Suno).
+    music: process.env.KIE_MUSIC_MODEL ?? "ai-music-api/generate",
   },
   video: { width: 1080, height: 1920, fps: 30 },
 };

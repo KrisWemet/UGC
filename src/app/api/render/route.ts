@@ -14,6 +14,8 @@ const Body = z.discriminatedUnion("action", [
     quality: z.enum(["premium", "budget"]),
     voiceId: z.string().max(100),
     aiLabel: z.boolean(),
+    motion: z.boolean().optional(),
+    music: z.boolean().optional(),
     script: ScriptSchema,
     siteImages: z.array(z.object({ url: z.string().url(), alt: z.string().max(300) })).max(12),
   }),

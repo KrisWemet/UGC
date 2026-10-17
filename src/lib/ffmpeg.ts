@@ -42,18 +42,24 @@ export async function mediaDuration(file: string): Promise<number> {
 }
 
 export type Shot =
-  | { start: number; end: number; kind: "video" } // a slice of the talking-head video
-  | { start: number; end: number; kind: "image"; file: string };
+  // A slice of the talking-head video. zoom > 1 punches in (jump-cut style).
+  | { start: number; end: number; kind: "video"; zoom?: number }
+  // A still with a slow push-in.
+  | { start: number; end: number; kind: "image"; file: string }
+  // An animated b-roll clip, played from its start.
+  | { start: number; end: number; kind: "clip"; file: string };
 
 function escapeFilterPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
 
-// Builds the ffmpeg arguments that cut shots together over the voiceover and
-// burn in the captions. Exported separately so it can be unit tested.
+// Builds the ffmpeg arguments that cut shots together over the voiceover,
+// mix in optional music and burn in the captions. Exported separately so it
+// can be unit tested.
 export function buildComposeArgs(opts: {
   shots: Shot[];
   audioFile: string;
+  musicFile?: string;
   talkingHeadFile?: string;
   assFile: string;
   fontsDir: string;
@@ -78,15 +84,26 @@ export function buildComposeArgs(opts: {
     );
   }
 
-  const fill = `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1`;
+  const fill = (w: number, h: number) => `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`;
   const shotLabels: string[] = [];
   let headCursor = 0;
   opts.shots.forEach((shot, i) => {
     const dur = Math.max(0.1, shot.end - shot.start);
     const label = `s${i}`;
     if (shot.kind === "video") {
+      const zoom = shot.zoom ?? 1;
+      const zw = Math.round((W * zoom) / 2) * 2;
+      const zh = Math.round((H * zoom) / 2) * 2;
+      // Punch-ins crop toward the upper middle, where the face is.
+      const crop = zoom > 1 ? `,crop=${W}:${H}:(iw-${W})/2:(ih-${H})*0.35` : "";
       filters.push(
-        `[${headLabels[headCursor++]}]trim=start=${shot.start.toFixed(3)}:end=${shot.end.toFixed(3)},setpts=PTS-STARTPTS,fps=${fps},${fill}[${label}]`,
+        `[${headLabels[headCursor++]}]trim=start=${shot.start.toFixed(3)}:end=${shot.end.toFixed(3)},setpts=PTS-STARTPTS,fps=${fps},${fill(zw, zh)}${crop},setsar=1[${label}]`,
+      );
+    } else if (shot.kind === "clip") {
+      inputs.push("-i", shot.file);
+      const idx = nextInput++;
+      filters.push(
+        `[${idx}:v]tpad=stop_mode=clone:stop_duration=${Math.ceil(dur)},trim=duration=${dur.toFixed(3)},setpts=PTS-STARTPTS,fps=${fps},${fill(W, H)},setsar=1[${label}]`,
       );
     } else {
       inputs.push("-i", shot.file);
@@ -95,7 +112,7 @@ export function buildComposeArgs(opts: {
       // Slow push-in ("Ken Burns"), alternating direction per shot.
       const zoom = i % 2 === 0 ? `1+0.12*on/${frames}` : `1.12-0.12*on/${frames}`;
       filters.push(
-        `[${idx}:v]scale=${Math.round(W * 1.25)}:${Math.round(H * 1.25)}:force_original_aspect_ratio=increase,crop=${Math.round(W * 1.25)}:${Math.round(H * 1.25)},` +
+        `[${idx}:v]${fill(Math.round(W * 1.25), Math.round(H * 1.25))},` +
           `zoompan=z='${zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${W}x${H}:fps=${fps},setsar=1[${label}]`,
       );
     }
@@ -108,7 +125,20 @@ export function buildComposeArgs(opts: {
   );
 
   inputs.push("-i", opts.audioFile);
-  const audioIdx = nextInput++;
+  const voiceIdx = nextInput++;
+  let audioMap = `${voiceIdx}:a`;
+  if (opts.musicFile) {
+    inputs.push("-i", opts.musicFile);
+    const musicIdx = nextInput++;
+    const fadeStart = Math.max(0, opts.duration - 1.2).toFixed(3);
+    // Music sits well under the voice and fades out at the end.
+    filters.push(
+      `[${musicIdx}:a]atrim=duration=${opts.duration.toFixed(3)},volume=0.14,afade=t=in:d=0.3,afade=t=out:st=${fadeStart}:d=1.2[bg]`,
+      `[${voiceIdx}:a]aresample=44100[vo]`,
+      `[vo][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`,
+    );
+    audioMap = "[aout]";
+  }
 
   return [
     ...inputs,
@@ -117,7 +147,7 @@ export function buildComposeArgs(opts: {
     "-map",
     "[out]",
     "-map",
-    `${audioIdx}:a`,
+    audioMap,
     "-t",
     opts.duration.toFixed(3),
     "-c:v",

@@ -42,6 +42,23 @@ export async function createTask(model: string, input: Record<string, unknown>):
   return data.taskId;
 }
 
+// Some models (e.g. Suno music) return {data: [{audio_url, ...}]} instead of
+// resultUrls; collect their file URLs in order.
+function mediaUrls(value: unknown): string[] {
+  const urls: string[] = [];
+  const visit = (v: unknown) => {
+    if (Array.isArray(v)) return v.forEach(visit);
+    if (!v || typeof v !== "object") return;
+    for (const key of ["audio_url", "video_url"]) {
+      const url = (v as Record<string, unknown>)[key];
+      if (typeof url === "string" && url.startsWith("http")) urls.push(url);
+    }
+    Object.values(v).forEach((child) => typeof child === "object" && visit(child));
+  };
+  visit(value);
+  return [...new Set(urls)];
+}
+
 export function parseTaskRecord(data: {
   state: KieTask["state"];
   resultJson?: string | null;
@@ -55,7 +72,7 @@ export function parseTaskRecord(data: {
       parsed = null;
     }
   }
-  const urls = Array.isArray(parsed?.resultUrls) ? (parsed.resultUrls as string[]) : [];
+  const urls = Array.isArray(parsed?.resultUrls) ? (parsed.resultUrls as string[]) : mediaUrls(parsed);
   const result = (parsed?.resultObject as Record<string, unknown> | undefined) ?? parsed;
   return {
     state: data.state,

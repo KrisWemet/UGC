@@ -49,6 +49,8 @@ export const SegmentSchema = z.object({
   imagePrompt: z.string().nullable(),
   // Index into the scraped site images, when a real product image fits better.
   siteImageIndex: z.number().int().nullable(),
+  // 2-4 punchy words shown as a pop-up sticker during this beat, e.g. "43G PROTEIN".
+  onScreenText: z.string().nullable().default(null),
 });
 export type Segment = z.infer<typeof SegmentSchema>;
 

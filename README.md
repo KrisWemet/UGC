@@ -8,11 +8,17 @@ Paste a product URL and get UGC-style short video ads (9:16, 20–30 seconds) fo
    - a voiceover from Google Gemini TTS (default, with a casual-creator speaking style) or ElevenLabs. If ElevenLabs fails, the app switches to a Google voice.
    - Seedream images for b-roll and the AI creator's portrait (or real product images from the site)
    - a talking-head video of the creator: Infinitalk (budget) or Kling Avatar (premium)
-4. **Compose** with ffmpeg: cuts between creator and b-roll with a slow zoom, burns in TikTok-style captions, an on-screen hook and an optional "AI-generated" label.
+4. **Edit** with ffmpeg in a fast UGC style:
+   - jump cuts: the creator's footage is cut into ~2-second shots that alternate with a punch-in zoom
+   - b-roll stills animated into short clips (Hailuo image-to-video), falling back to a slow zoom if a clip fails
+   - pop-up text stickers on key beats ("43G PROTEIN"), TikTok-style captions with numbers in yellow, an on-screen hook and an optional "AI-generated" label
+   - an instrumental music bed (Suno) mixed under the voice
+
+   Animated b-roll and music can be turned off per video to save credits and time.
 
 Two formats:
 
-- **AI creator**: hook → problem (b-roll) → solution → demo (b-roll) → call to action
+- **AI creator**: hook → problem (b-roll) → solution → two demo shots (b-roll) → key fact → call to action
 - **Faceless**: all visuals and voiceover. Cheaper and faster, with no synthetic person.
 
 The pipeline is adapted from the SaaSShorts module of [OpenShorts](https://github.com/mutonby/openshorts) (MIT).

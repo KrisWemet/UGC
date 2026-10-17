@@ -186,14 +186,107 @@ async function stepVisual(job: RenderJob, visual: RenderJob["visuals"][number]) 
   if (task.state === "success") visual.url = firstUrl(task.urls, "Image");
 }
 
-export function buildShots(job: RenderJob, files: Map<number, string>): Shot[] {
+const CLIP_PROMPT =
+  "Natural, realistic motion: subtle handheld phone camera movement and gentle movement in the scene. Keep the composition and subject. No text, no logos, no cuts.";
+
+// Animates a b-roll still into a short clip. Optional: if it fails, the still
+// is used with a slow zoom instead.
+async function stepClip(job: RenderJob, visual: RenderJob["visuals"][number]) {
+  const clip = visual.clip;
+  if (!job.motion || clip.skipped || clip.url || !visual.url) return;
+  if (!clip.taskId) {
+    const segment = job.script.segments[visual.segment];
+    clip.taskId = await createTask(config.kie.imageToVideo, {
+      prompt: `${CLIP_PROMPT} Scene: ${segment.imagePrompt ?? segment.narration}`,
+      image_url: visual.url,
+      duration: "6",
+      resolution: "768P",
+    });
+    return;
+  }
+  const task = await getTask(clip.taskId);
+  if (task.state === "fail") {
+    clip.attempts += 1;
+    clip.taskId = null;
+    if (clip.attempts >= 2) {
+      clip.skipped = true;
+      log(job, `Couldn't animate segment ${visual.segment + 1} (${task.error}); using the still image.`);
+    }
+    return;
+  }
+  if (task.state === "success") {
+    clip.url = firstUrl(task.urls, "B-roll clip");
+    log(job, `B-roll clip for segment ${visual.segment + 1} ready.`);
+  }
+}
+
+const MUSIC_PROMPT =
+  "Upbeat, bouncy instrumental background beat for a casual TikTok creator video. Warm, modern, light drums, no vocals, steady energy that sits under speech.";
+
+// Background music. Optional: skipped if it fails.
+async function stepTrack(job: RenderJob) {
+  const track = job.track;
+  if (!job.music || track.skipped || track.url) return;
+  if (!track.taskId) {
+    track.taskId = await createTask(config.kie.music, {
+      custom_mode: false,
+      instrumental: true,
+      model: "V6_MINI",
+      prompt: MUSIC_PROMPT,
+    });
+    log(job, "Background music started.");
+    return;
+  }
+  const task = await getTask(track.taskId);
+  if (task.state === "fail") {
+    track.skipped = true;
+    log(job, `Background music failed (${task.error}); continuing without it.`);
+    return;
+  }
+  if (task.state === "success") {
+    track.url = firstUrl(task.urls, "Background music");
+    log(job, "Background music ready.");
+  }
+}
+
+// Long talking-head stretches are split into ~2s shots that alternate between
+// a normal frame and a punch-in, the jump-cut rhythm of UGC edits.
+export function splitForJumpCuts(start: number, end: number, target = 2.2): { start: number; end: number }[] {
+  const parts = Math.max(1, Math.round((end - start) / target));
+  const step = (end - start) / parts;
+  return Array.from({ length: parts }, (_, i) => ({ start: start + i * step, end: i === parts - 1 ? end : start + (i + 1) * step }));
+}
+
+export function buildShots(
+  job: RenderJob,
+  images: Map<number, string>,
+  clips: Map<number, string> = new Map(),
+): Shot[] {
   const segments = job.voice.segments!;
-  return job.script.segments.map((seg, i) => {
+  let punch = false;
+  return job.script.segments.flatMap((seg, i): Shot[] => {
     const { start, end } = segments[i];
-    if (seg.shot === "actor" && job.mode === "actor") return { kind: "video" as const, start, end };
-    const file = files.get(i);
+    if (seg.shot === "actor" && job.mode === "actor") {
+      return splitForJumpCuts(start, end).map((part) => {
+        punch = !punch;
+        return { kind: "video" as const, ...part, zoom: punch ? 1 : 1.18 };
+      });
+    }
+    const clip = clips.get(i);
+    if (clip) return [{ kind: "clip" as const, start, end, file: clip }];
+    const file = images.get(i);
     if (!file) throw new Error(`Missing image for segment ${i + 1}.`);
-    return { kind: "image" as const, start, end, file };
+    return [{ kind: "image" as const, start, end, file }];
+  });
+}
+
+export function buildStickers(job: RenderJob) {
+  const segments = job.voice.segments!;
+  return job.script.segments.flatMap((seg, i) => {
+    const text = seg.onScreenText?.trim();
+    if (!text || i === 0) return [];
+    const { start, end } = segments[i];
+    return [{ text, start: start + 0.15, end: Math.min(end - 0.05, start + 2) }];
   });
 }
 
@@ -210,14 +303,27 @@ async function compose(job: RenderJob) {
       await writeFile(talkingHeadFile, await downloadBuffer(job.head.url!));
     }
 
-    const files = new Map<number, string>();
+    const images = new Map<number, string>();
+    const clips = new Map<number, string>();
     await Promise.all(
       job.visuals.map(async (v) => {
+        if (v.clip.url) {
+          const file = path.join(dir, `clip-${v.segment}.mp4`);
+          await writeFile(file, await downloadBuffer(v.clip.url));
+          clips.set(v.segment, file);
+          return;
+        }
         const file = path.join(dir, `visual-${v.segment}.img`);
         await writeFile(file, await downloadBuffer(v.url!, 30 * 1024 * 1024));
-        files.set(v.segment, file);
+        images.set(v.segment, file);
       }),
     );
+
+    let musicFile: string | undefined;
+    if (job.track.url) {
+      musicFile = path.join(dir, "music.audio");
+      await writeFile(musicFile, await downloadBuffer(job.track.url, 30 * 1024 * 1024));
+    }
 
     const duration = job.voice.duration!;
     const assFile = path.join(dir, "captions.ass");
@@ -229,14 +335,16 @@ async function compose(job: RenderJob) {
         hookEnd: Math.min(job.voice.segments![0].end, 3.5),
         duration,
         aiLabel: job.aiLabel,
+        stickers: buildStickers(job),
       }),
     );
 
     const outFile = path.join(dir, "final.mp4");
     await runFfmpeg(
       buildComposeArgs({
-        shots: buildShots(job, files),
+        shots: buildShots(job, images, clips),
         audioFile,
+        musicFile,
         talkingHeadFile,
         assFile,
         fontsDir: FONTS_DIR,
@@ -257,7 +365,8 @@ async function compose(job: RenderJob) {
 export function assetsReady(job: RenderJob): boolean {
   return (
     !!job.voice.url &&
-    job.visuals.every((v) => v.url) &&
+    job.visuals.every((v) => v.url && (!job.motion || v.clip.url || v.clip.skipped)) &&
+    (!job.music || !!job.track.url || job.track.skipped) &&
     (job.mode === "faceless" || (!!job.actor.url && !!job.head.url))
   );
 }
@@ -266,7 +375,12 @@ export async function advance(input: RenderJob): Promise<RenderJob> {
   const job: RenderJob = structuredClone(input);
   if (job.status !== "running") return job;
   try {
-    await Promise.all([stepVoice(job), stepActor(job), ...job.visuals.map((v) => stepVisual(job, v))]);
+    await Promise.all([
+      stepVoice(job),
+      stepActor(job),
+      stepTrack(job),
+      ...job.visuals.map((v) => stepVisual(job, v).then(() => stepClip(job, v))),
+    ]);
     await stepHead(job);
     if (assetsReady(job)) await compose(job);
   } catch (err) {

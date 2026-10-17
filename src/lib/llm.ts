@@ -172,14 +172,17 @@ export async function researchProduct(site: ScrapedSite): Promise<Research> {
 // ── Step 3: scripts ────────────────────────────────────────────────────────
 
 const STRUCTURES: Record<VideoMode, string> = {
-  actor: `Use exactly 5 segments in this order:
+  actor: `Use exactly 7 short segments in this order (fast pacing keeps people watching):
 1. hook (shot "actor"): the creator says a scroll-stopping first line.
-2. problem (shot "visual"): voiceover over an image of the problem.
+2. problem (shot "visual"): voiceover over the problem.
 3. solution (shot "actor"): the creator introduces the product naturally.
-4. demo (shot "visual"): voiceover over the product or the result.
-5. cta (shot "actor"): a short call to action ("link in bio" style).`,
-  faceless: `Use 5 to 6 segments, all with shot "visual": hook, problem, solution, demo (and optionally proof), cta.
-The voiceover carries the story; every segment needs a strong image.`,
+4. demo (shot "visual"): the product up close.
+5. demo (shot "visual"): a different angle: someone enjoying or using it, or the result.
+6. proof (shot "actor"): the creator's quick take or the key fact.
+7. cta (shot "actor"): a short call to action ("link in bio" style).
+Each segment is one short sentence (5-12 words).`,
+  faceless: `Use 6 to 8 short segments, all with shot "visual": hook, problem, solution, demo (2-3 different shots), proof, cta.
+The voiceover carries the story; every segment needs a strong, different image. One short sentence per segment.`,
 };
 
 export async function generateScripts(
@@ -214,7 +217,9 @@ ${STRUCTURES[mode]}
 
 Length: 55-75 spoken words in total per script (about 20-28 seconds). Each segment's narration is what is spoken during that segment.
 
-For every "visual" segment, write imagePrompt: a specific, photorealistic vertical (9:16) scene description with no text, logos or UI in the image. If one of the site images fits a solution/demo segment better (a real product shot or screenshot), also set siteImageIndex to its number; otherwise null. For "actor" segments set imagePrompt and siteImageIndex to null.
+For every "visual" segment, write imagePrompt: a specific, photorealistic vertical (9:16) scene with something that can move (steam, hands, pouring, a person reacting, the camera pushing in), and no text, logos or UI in the image. Vary the scenes: close-ups, people, settings. If one of the site images fits a solution/demo segment better (a real product shot or screenshot), also set siteImageIndex to its number; otherwise null. For "actor" segments set imagePrompt and siteImageIndex to null.
+
+onScreenText: for 3-4 of the segments (not the hook), 2-4 punchy words to pop up on screen, like "43G PROTEIN" or "LIMITED TIME"; null for the rest. Use only facts from the brief.
 
 hookText: 2-5 words shown on screen during the hook.
 actorDescription: physical appearance only (age, gender, ethnicity, hair, casual clothing), written in English, varied across scripts. Even in faceless mode, fill it in.
