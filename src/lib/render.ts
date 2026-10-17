@@ -25,6 +25,16 @@ function actorPrompt(description: string) {
   return `Vertical smartphone selfie video still of ${description}, looking straight at the camera with a relaxed, friendly expression, upper body framed in the center, sitting in a lived-in apartment with soft window light. Candid and real, not a model shoot. No text.`;
 }
 
+const MAX_ATTEMPTS = 3;
+
+// A failed task is started again (up to MAX_ATTEMPTS) before failing the job.
+function retryOrFail(job: RenderJob, ref: { taskId: string | null; attempts: number }, what: string, error: string | null) {
+  ref.attempts += 1;
+  if (ref.attempts >= MAX_ATTEMPTS) throw new Error(`${what} failed after ${ref.attempts} attempts: ${error}`);
+  ref.taskId = null;
+  log(job, `${what} failed (${error}); retrying.`);
+}
+
 function firstUrl(urls: string[], what: string): string {
   if (!urls[0]) throw new Error(`${what} finished but returned no file.`);
   return urls[0];
@@ -47,7 +57,7 @@ async function stepVoice(job: RenderJob) {
   }
   if (job.voice.url) return;
   const task = await getTask(job.voice.taskId);
-  if (task.state === "fail") throw new Error(`Voiceover failed: ${task.error}`);
+  if (task.state === "fail") return retryOrFail(job, job.voice, "Voiceover", task.error);
   if (task.state !== "success") return;
 
   const audioUrl =
@@ -88,7 +98,7 @@ async function stepActor(job: RenderJob) {
     return;
   }
   const task = await getTask(job.actor.taskId);
-  if (task.state === "fail") throw new Error(`Actor portrait failed: ${task.error}`);
+  if (task.state === "fail") return retryOrFail(job, job.actor, "Actor portrait", task.error);
   if (task.state === "success") {
     job.actor.url = firstUrl(task.urls, "Actor portrait");
     log(job, "Actor portrait ready.");
@@ -109,7 +119,7 @@ async function stepHead(job: RenderJob) {
     return;
   }
   const task = await getTask(job.head.taskId);
-  if (task.state === "fail") throw new Error(`Talking-head video failed: ${task.error}`);
+  if (task.state === "fail") return retryOrFail(job, job.head, "Talking-head video", task.error);
   if (task.state === "success") {
     job.head.url = firstUrl(task.urls, "Talking-head video");
     log(job, "Talking-head video ready.");
@@ -149,7 +159,7 @@ async function stepVisual(job: RenderJob, visual: RenderJob["visuals"][number]) 
     return;
   }
   const task = await getTask(visual.taskId);
-  if (task.state === "fail") throw new Error(`Image for segment ${visual.segment + 1} failed: ${task.error}`);
+  if (task.state === "fail") return retryOrFail(job, visual, `Image for segment ${visual.segment + 1}`, task.error);
   if (task.state === "success") visual.url = firstUrl(task.urls, "Image");
 }
 

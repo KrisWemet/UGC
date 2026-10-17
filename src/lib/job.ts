@@ -7,6 +7,8 @@ import { ScriptSchema, VideoModeSchema } from "./types";
 const TaskRef = z.object({
   taskId: z.string().max(200).nullable(),
   url: z.string().url().max(2000).nullable(),
+  // Failed attempts so far; kie.ai tasks sometimes fail with transient errors.
+  attempts: z.number().int().min(0).max(10).default(0),
 });
 
 export const RenderJobSchema = z.object({
@@ -48,7 +50,7 @@ export function newJob(input: {
   script: RenderJob["script"];
   siteImages: RenderJob["siteImages"];
 }): RenderJob {
-  const empty = { taskId: null, url: null };
+  const empty = { taskId: null, url: null, attempts: 0 };
   return {
     id: crypto.randomUUID(),
     ...input,

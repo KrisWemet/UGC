@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { generateScripts } from "@/lib/claude";
+import { generateScripts } from "@/lib/llm";
 import { ProductBriefSchema, VideoModeSchema } from "@/lib/types";
 
 export const maxDuration = 300;

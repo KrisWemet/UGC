@@ -27,9 +27,12 @@ npm run dev
 
 Open http://localhost:3000.
 
+Some large brand sites block automated visitors. When that happens the app asks you to paste the product details instead, and research continues from that text.
+
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | yes | Research and scripts (Claude) |
+| `ANTHROPIC_API_KEY` | one of these two | Research and scripts with Claude, including web search for reviews and competitors |
+| `OPENROUTER_API_KEY` | | Used when no Anthropic key is set: free OpenRouter models write the brief and scripts from the site's content only (no web search). Override the model list with `OPENROUTER_MODELS`. |
 | `KIE_API_KEY` | yes | Voice, images, talking head |
 | `BLOB_READ_WRITE_TOKEN` | no | Keep finished videos in Vercel Blob. Without it they're stored on kie.ai for 24 hours. |
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` | no, but set them when deployed | Password-protects the app so strangers can't spend your credits |

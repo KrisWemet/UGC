@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { researchProduct } from "@/lib/claude";
+import { researchProduct } from "@/lib/llm";
 import { UnsafeUrlError } from "@/lib/safe-fetch";
-import { scrapeSite } from "@/lib/scrape";
+import { scrapeSite, SiteBlockedError, siteFromPastedText } from "@/lib/scrape";
 
 export const maxDuration = 300;
 
-const Body = z.object({ url: z.string().min(4).max(2000) });
+const Body = z.object({ url: z.string().min(4).max(2000), pastedText: z.string().max(50_000).optional() });
 
 export async function POST(request: Request) {
   const parsed = Body.safeParse(await request.json().catch(() => null));
@@ -15,11 +15,15 @@ export async function POST(request: Request) {
   let url = parsed.data.url.trim();
   if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
   try {
-    const site = await scrapeSite(url);
+    const pasted = parsed.data.pastedText?.trim();
+    const site = pasted ? siteFromPastedText(url, pasted) : await scrapeSite(url);
     return NextResponse.json({ research: await researchProduct(site) });
   } catch (err) {
-    const status = err instanceof UnsafeUrlError ? 400 : 500;
-    console.error("research failed:", err);
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Research failed." }, { status });
+    const status = err instanceof UnsafeUrlError ? 400 : err instanceof SiteBlockedError ? 422 : 500;
+    if (status === 500) console.error("research failed:", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Research failed.", blocked: err instanceof SiteBlockedError },
+      { status },
+    );
   }
 }

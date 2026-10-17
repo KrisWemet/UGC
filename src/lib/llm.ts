@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
 import { config, requireEnv } from "./config";
+import { openRouterJson, usingOpenRouter } from "./openrouter";
 import type { ScrapedSite } from "./scrape";
 import {
   ProductBriefSchema,
@@ -13,7 +14,32 @@ import {
   type VideoMode,
 } from "./types";
 
-const client = new Anthropic();
+// Created lazily so the app can run on OpenRouter alone.
+let anthropic: Anthropic | null = null;
+const client = () => (anthropic ??= new Anthropic({ apiKey: requireEnv("ANTHROPIC_API_KEY") }));
+
+// One structured-output call, on Claude when ANTHROPIC_API_KEY is set and on
+// a free OpenRouter model otherwise.
+async function structured<T extends z.ZodType>(opts: {
+  schema: T;
+  system: string;
+  user: string;
+  effort: "medium" | "high";
+  step: string;
+}): Promise<z.infer<T>> {
+  if (usingOpenRouter()) return openRouterJson(opts.schema, opts.system, opts.user);
+  const response = await client().beta.messages.parse({
+    model: config.claudeModel,
+    max_tokens: 16000,
+    output_config: { effort: opts.effort, format: betaZodOutputFormat(opts.schema) },
+    system: opts.system,
+    messages: [{ role: "user", content: opts.user }],
+    ...FALLBACK,
+  });
+  assertNotRefused(response, opts.step);
+  if (!response.parsed_output) throw new Error(`Claude's ${opts.step} did not match the schema.`);
+  return response.parsed_output as z.infer<T>;
+}
 
 // Server-side fallback: if a request is declined by a safety classifier, the
 // API retries it on Anthropic's recommended fallback model in the same call.
@@ -44,7 +70,7 @@ Search the web for what real customers say about it (reviews, Reddit, forums, co
 
   // Server-side tools can pause a long turn; resume until the turn ends.
   for (let i = 0; i < 4; i++) {
-    const response = await client.beta.messages.create({
+    const response = await client().beta.messages.create({
       model: config.claudeModel,
       max_tokens: 16000,
       output_config: { effort: "medium" },
@@ -77,28 +103,21 @@ async function synthesizeBrief(site: ScrapedSite, notes: string): Promise<Produc
     ...site.extraPages.map((p) => `Page ${p.url}:\n${p.text}`),
   ].join("\n\n");
 
-  const response = await client.beta.messages.parse({
-    model: config.claudeModel,
-    max_tokens: 16000,
-    output_config: { effort: "medium", format: betaZodOutputFormat(ProductBriefSchema) },
+  return structured({
+    schema: ProductBriefSchema,
+    effort: "medium",
+    step: "brief",
     system:
       "You are a performance-marketing strategist who writes briefs for UGC-style short video ads. Ground every claim in the website content or the research notes. Put a claim in verifiableClaims only if a viewer could confirm it on the site or in a cited source; never invent statistics, customer counts or results.",
-    messages: [
-      {
-        role: "user",
-        content: `<website>\n${sitePages}\n</website>\n\n<research_notes>\n${notes || "No web research available."}\n</research_notes>\n\nWrite the product brief. Include 4-8 pain points, 4-6 hook ideas and 3-5 distinct angles.`,
-      },
-    ],
-    ...FALLBACK,
+    user: `<website>\n${sitePages}\n</website>\n\n<research_notes>\n${notes || "No web research available."}\n</research_notes>\n\nWrite the product brief. Include 4-8 pain points, 4-6 hook ideas and 3-5 distinct angles.`,
   });
-  assertNotRefused(response, "brief");
-  if (!response.parsed_output) throw new Error("Claude returned a brief that did not match the schema.");
-  return response.parsed_output;
 }
 
 export async function researchProduct(site: ScrapedSite): Promise<Research> {
-  requireEnv("ANTHROPIC_API_KEY");
-  const { notes, sources } = await webResearch(site).catch((err) => {
+  // Web search needs Claude's server-side tool; free OpenRouter models get the
+  // site content only.
+  const research = usingOpenRouter() ? Promise.resolve({ notes: "", sources: [] as Source[] }) : webResearch(site);
+  const { notes, sources } = await research.catch((err) => {
     // Web research is a bonus; the site content alone can still produce a brief.
     console.error("web research failed, continuing with site content only:", err);
     return { notes: "", sources: [] as Source[] };
@@ -125,18 +144,14 @@ export async function generateScripts(
   mode: VideoMode,
   count: number,
 ): Promise<Script[]> {
-  requireEnv("ANTHROPIC_API_KEY");
   const imageList = research.images.length
     ? research.images.map((img, i) => `${i}: ${img.alt || "(no alt text)"} — ${img.url}`).join("\n")
     : "None found.";
 
-  const response = await client.beta.messages.parse({
-    model: config.claudeModel,
-    max_tokens: 16000,
-    output_config: {
-      effort: "high",
-      format: betaZodOutputFormat(z.object({ scripts: z.array(ScriptSchema) })),
-    },
+  const { scripts } = await structured({
+    schema: z.object({ scripts: z.array(ScriptSchema) }),
+    effort: "high",
+    step: "script",
     system: `You write short-form UGC-style video ads for TikTok, Reels and Shorts.
 
 Voice: a real person casually sharing a find with a friend. Contractions, short sentences, no corporate language.
@@ -145,10 +160,7 @@ Honesty rules (these ads must comply with FTC and Competition Bureau guidance):
 - The speaker is a creator presenting the product, not a customer giving a testimonial. Never claim personal results, long-term use, or "I've been using this for months".
 - Only state facts from the brief's verifiableClaims, keyFeatures or pricing. No invented numbers.
 - No fake urgency (no invented discounts or deadlines).`,
-    messages: [
-      {
-        role: "user",
-        content: `<brief>\n${JSON.stringify(research.brief, null, 2)}\n</brief>
+    user: `<brief>\n${JSON.stringify(research.brief, null, 2)}\n</brief>
 
 <site_images>\n${imageList}\n</site_images>
 
@@ -163,12 +175,7 @@ For every "visual" segment, write imagePrompt: a specific, photorealistic vertic
 hookText: 2-5 words shown on screen during the hook.
 actorDescription: physical appearance only (age, gender, ethnicity, hair, casual clothing), written in English, varied across scripts. Even in faceless mode, fill it in.
 caption: a post caption that ends with a disclosure such as "#ad".`,
-      },
-    ],
-    ...FALLBACK,
   });
-  assertNotRefused(response, "script");
-  const scripts = response.parsed_output?.scripts;
   if (!scripts?.length) throw new Error("Claude returned no scripts.");
   return scripts.map((s) => normalizeScript(s, mode, research.images.length));
 }

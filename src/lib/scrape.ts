@@ -39,6 +39,7 @@ export function extractImages($: cheerio.CheerioAPI, base: string): SiteImage[] 
       return;
     }
     if (/\.(svg|gif|ico)(\?|$)/i.test(abs) || /(logo|icon|favicon|sprite|avatar|badge)/i.test(abs)) return;
+    if (/logo|icon/i.test(alt) || /track|pixel|beacon/i.test(abs)) return;
     if (seen.has(abs)) return;
     seen.add(abs);
     images.push({ url: abs, alt: alt.trim().slice(0, 140) });
@@ -55,9 +56,22 @@ export function extractImages($: cheerio.CheerioAPI, base: string): SiteImage[] 
   return images.slice(0, 8);
 }
 
+export class SiteBlockedError extends Error {}
+
+// Used when a site blocks automated requests: the person pastes the page text
+// (or a product description) instead, and research works from that.
+export function siteFromPastedText(url: string, pasted: string): ScrapedSite {
+  const text = pasted.replace(/\s+/g, " ").trim().slice(0, 20_000);
+  return { url, title: new URL(url).hostname, description: "", headings: [], text, extraPages: [], images: [] };
+}
+
 export async function scrapeSite(url: string): Promise<ScrapedSite> {
   const html = await fetchHtml(url);
-  if (!html) throw new Error(`Could not load ${url} as a web page.`);
+  if (!html) {
+    throw new SiteBlockedError(
+      `Couldn't read ${url}. The site may block automated visitors. Paste the product details below to continue.`,
+    );
+  }
   const $ = cheerio.load(html);
 
   const title = $("title").first().text().trim();

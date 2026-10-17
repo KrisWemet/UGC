@@ -15,7 +15,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({ error: `Request failed (${res.status}).` }));
-  if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status}).`);
+  if (!res.ok) throw Object.assign(new Error(data.error ?? `Request failed (${res.status}).`), { blocked: !!data.blocked });
   return data as T;
 }
 
@@ -37,6 +37,8 @@ function saveJobs(jobs: RenderJob[]) {
 
 export default function Studio() {
   const [url, setUrl] = useState("");
+  const [pastedText, setPastedText] = useState("");
+  const [needsPaste, setNeedsPaste] = useState(false);
   const [research, setResearch] = useState<Research | null>(null);
   const [scripts, setScripts] = useState<Script[]>([]);
   const [mode, setMode] = useState<VideoMode>("actor");
@@ -74,10 +76,14 @@ export default function Studio() {
     setResearch(null);
     setScripts([]);
     try {
-      const { research } = await post<{ research: Research }>("/api/research", { url });
+      const { research } = await post<{ research: Research }>("/api/research", {
+        url,
+        pastedText: needsPaste ? pastedText : undefined,
+      });
       setResearch(research);
     } catch (err) {
       setError((err as Error).message);
+      if ((err as { blocked?: boolean }).blocked) setNeedsPaste(true);
     } finally {
       setBusy(null);
     }
@@ -139,7 +145,17 @@ export default function Studio() {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
         />
-        <button disabled={busy !== null}>{busy === "research" ? "Researching… (about a minute)" : "Research"}</button>
+        <button disabled={busy !== null || (needsPaste && !pastedText.trim())}>
+          {busy === "research" ? "Researching… (about a minute)" : "Research"}
+        </button>
+        {needsPaste && (
+          <textarea
+            style={{ minHeight: 140 }}
+            placeholder="Paste the product page text or a description: what it is, who it's for, key features, prices, offers."
+            value={pastedText}
+            onChange={(e) => setPastedText(e.target.value)}
+          />
+        )}
       </form>
 
       {error && <p className="panel error">{error}</p>}
