@@ -14,6 +14,7 @@ const script: Script = {
   actorDescription: "a 28 year old woman with curly hair in a grey hoodie",
   caption: "Try it #ad",
   hashtags: ["#ad"],
+  hookVariants: [{ line: "Nobody talks about this shortcut.", hookText: "The shortcut" }],
   segments: [
     { kind: "hook", narration: "Okay stop doing this by hand.", shot: "actor", imagePrompt: null, siteImageIndex: null, onScreenText: null },
     { kind: "problem", narration: "Spreadsheets everywhere, nothing adds up.", shot: "visual", imagePrompt: "messy desk", siteImageIndex: null, onScreenText: null },
@@ -193,5 +194,30 @@ describe("editing", async () => {
     expect(sticker.text).toBe("No more spreadsheets");
     expect(sticker.start).toBeCloseTo(4.55);
     expect(sticker.end).toBeCloseTo(6.4);
+  });
+});
+
+describe("hook variants", async () => {
+  const { variantJob } = await import("@/lib/job");
+  it("swaps only the hook and reuses finished assets", () => {
+    const parent = newJob({ mode: "actor", quality: "premium", voiceId: "gemini:Puck", aiLabel: true, script, siteImages: [] });
+    parent.status = "done";
+    parent.actor.url = "https://x/actor.png";
+    parent.holding.url = "https://x/holding.png";
+    parent.track.url = "https://x/music.mp3";
+    parent.visuals[0].url = "https://x/b.jpg";
+    parent.visuals[0].clip.url = "https://x/b.mp4";
+    parent.head.url = "https://x/head.mp4";
+    const v = variantJob(parent, script.hookVariants[0]);
+    expect(v.id).not.toBe(parent.id);
+    expect(v.status).toBe("running");
+    expect(v.script.segments[0].narration).toBe("Nobody talks about this shortcut.");
+    expect(v.script.segments.slice(1)).toEqual(parent.script.segments.slice(1));
+    expect(v.actor.url).toBe(parent.actor.url);
+    expect(v.holding.url).toBe(parent.holding.url);
+    expect(v.track.url).toBe(parent.track.url);
+    expect(v.visuals[0]).toMatchObject({ url: "https://x/b.jpg", clip: { url: "https://x/b.mp4" } });
+    expect(v.head.url).toBeNull();
+    expect(v.voice.url).toBeNull();
   });
 });

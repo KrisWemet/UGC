@@ -62,5 +62,7 @@ export const ScriptSchema = z.object({
   actorDescription: z.string(),
   caption: z.string(),
   hashtags: z.array(z.string()),
+  // Alternative opening lines for A/B testing the hook.
+  hookVariants: z.array(z.object({ line: z.string(), hookText: z.string() })).default([]),
 });
 export type Script = z.infer<typeof ScriptSchema>;

@@ -19,29 +19,60 @@ function assText(text: string): string {
   return text.replace(/[{}\\]/g, "").replace(/\r?\n/g, " ");
 }
 
-// Groups words into short caption chunks, breaking early at sentence ends.
-export function chunkWords(words: WordTiming[], maxWords = 3): WordTiming[] {
-  const chunks: WordTiming[] = [];
+// Groups words into short caption lines, breaking early at sentence ends.
+export function groupWords(words: WordTiming[], maxWords = 3): WordTiming[][] {
+  const groups: WordTiming[][] = [];
   let group: WordTiming[] = [];
-  const flush = () => {
-    if (group.length === 0) return;
-    chunks.push({
-      word: group.map((w) => w.word).join(" "),
-      start: group[0].start,
-      end: group[group.length - 1].end,
-    });
-    group = [];
-  };
   for (const w of words) {
     group.push(w);
-    if (group.length >= maxWords || /[.!?,]$/.test(w.word)) flush();
+    if (group.length >= maxWords || /[.!?,]$/.test(w.word)) {
+      groups.push(group);
+      group = [];
+    }
   }
-  flush();
-  // Close gaps so a caption stays up until the next one starts.
+  if (group.length) groups.push(group);
+  return groups;
+}
+
+// One caption line per group, with its start/end (gaps under 0.4s closed so
+// a line stays up until the next one starts).
+export function chunkWords(words: WordTiming[], maxWords = 3): WordTiming[] {
+  const chunks = groupWords(words, maxWords).map((g) => ({
+    word: g.map((w) => w.word).join(" "),
+    start: g[0].start,
+    end: g[g.length - 1].end,
+  }));
   for (let i = 0; i < chunks.length - 1; i++) {
     if (chunks[i + 1].start - chunks[i].end < 0.4) chunks[i].end = chunks[i + 1].start;
   }
   return chunks;
+}
+
+const HIGHLIGHT = "&H0000E1FF&"; // yellow (ASS colours are BGR)
+
+// Karaoke-style captions: the line stays on screen and the word being spoken
+// turns yellow and slightly larger.
+function karaokeLines(words: WordTiming[]): string[] {
+  const groups = groupWords(words);
+  const lines: string[] = [];
+  groups.forEach((group, gi) => {
+    const nextStart = groups[gi + 1]?.[0].start;
+    const groupEnd = group[group.length - 1].end;
+    const lineEnd = nextStart !== undefined && nextStart - groupEnd < 0.4 ? nextStart : groupEnd;
+    const clean = group.map((w) => assText(w.word.replace(/[.,!?;:]+$/g, "").toUpperCase()));
+    group.forEach((w, wi) => {
+      const start = w.start;
+      const end = wi + 1 < group.length ? group[wi + 1].start : lineEnd;
+      if (end <= start) return;
+      const text = clean
+        .map((t, ti) => (ti === wi ? `{\\c${HIGHLIGHT}\\fscx112\\fscy112}${t}{\\c&H00FFFFFF&\\fscx100\\fscy100}` : t))
+        .join(" ");
+      // The line pops in on its first word only.
+      const pop = wi === 0 ? "{\\fscx80\\fscy80\\t(0,80,\\fscx100\\fscy100)}" : "";
+      lines.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Caption,,0,0,0,,${pop}${text}`);
+    });
+  });
+  return lines;
 }
 
 export type Sticker = { text: string; start: number; end: number };
@@ -75,15 +106,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   if (opts.hookText.trim()) {
     lines.push(`Dialogue: 1,${assTime(0)},${assTime(opts.hookEnd)},Hook,,0,0,0,,${assText(opts.hookText.toUpperCase())}`);
   }
-  for (const c of chunkWords(opts.words)) {
-    const text = assText(c.word.replace(/[.,!?;:]+$/g, "").toUpperCase());
-    // Numbers are the hook of most ads: show those chunks in yellow.
-    const color = /\d/.test(text) ? "\\c&H0000E1FF&" : "";
-    // Pop-in: start at 80% scale and grow to full size over 80ms.
-    lines.push(
-      `Dialogue: 0,${assTime(c.start)},${assTime(c.end)},Caption,,0,0,0,,{\\fscx80\\fscy80\\t(0,80,\\fscx100\\fscy100)${color}}${text}`,
-    );
-  }
+  lines.push(...karaokeLines(opts.words));
   // Pop-up stickers: tilted yellow labels that overshoot then settle. They sit
   // near the top, above the creator's head and below the TikTok header, and
   // take the hook's spot once the hook is gone.

@@ -16,6 +16,8 @@ export const config = {
     avatarBudget: process.env.KIE_AVATAR_BUDGET_MODEL ?? "infinitalk/from-audio",
     // Animates b-roll stills into short clips.
     imageToVideo: process.env.KIE_IMG2VIDEO_MODEL ?? "hailuo/2-3-image-to-video-standard",
+    // Edits the creator's portrait so they hold the product.
+    imageEdit: process.env.KIE_IMAGE_EDIT_MODEL ?? "google/nano-banana-edit",
     // Instrumental background music (Suno).
     music: process.env.KIE_MUSIC_MODEL ?? "ai-music-api/generate",
   },

@@ -48,6 +48,7 @@ export default function Studio() {
   const [aiLabel, setAiLabel] = useState(true);
   const [motion, setMotion] = useState(true);
   const [music, setMusic] = useState(true);
+  const [productInHand, setProductInHand] = useState(true);
   const [busy, setBusy] = useState<"research" | "scripts" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<RenderJob[]>([]);
@@ -115,6 +116,16 @@ export default function Studio() {
     );
   }
 
+  async function renderVariant(job: RenderJob, variant: number) {
+    setError(null);
+    try {
+      const { job: next } = await post<{ job: RenderJob }>("/api/render", { action: "variant", job, variant });
+      setJobs((all) => [next, ...all]);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
   async function render(script: Script) {
     if (!research) return;
     setError(null);
@@ -127,6 +138,7 @@ export default function Studio() {
         aiLabel,
         motion,
         music,
+        productInHand,
         script,
         siteImages: research.images,
       });
@@ -268,6 +280,12 @@ export default function Studio() {
               <input type="checkbox" checked={music} onChange={(e) => setMusic(e.target.checked)} />
               Background music
             </label>
+            {mode === "actor" && (
+              <label className="inline small">
+                <input type="checkbox" checked={productInHand} onChange={(e) => setProductInHand(e.target.checked)} />
+                Creator holds the product
+              </label>
+            )}
           </div>
           <div className="grid">
             {scripts.map((script, si) => (
@@ -323,6 +341,16 @@ export default function Studio() {
                       {job.final.expires && <span className="muted"> · link expires in 24 hours</span>}
                     </p>
                   </>
+                )}
+                {job.status === "done" && job.script.hookVariants.length > 0 && (
+                  <div className="row small" style={{ margin: "8px 0" }}>
+                    <span className="muted">A/B test the hook:</span>
+                    {job.script.hookVariants.map((v, vi) => (
+                      <button key={vi} className="secondary" onClick={() => renderVariant(job, vi)} title={v.line}>
+                        {v.hookText}
+                      </button>
+                    ))}
+                  </div>
                 )}
                 <div className="log">{job.log.join("\n")}</div>
               </article>

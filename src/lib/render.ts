@@ -123,12 +123,64 @@ async function stepActor(job: RenderJob) {
   }
 }
 
+// The product shot the creator should hold: a real site image if there is
+// one, otherwise the first generated demo image.
+export function productVisual(job: RenderJob) {
+  const ready = job.visuals.filter((v) => v.url);
+  return (
+    ready.find((v) => v.source === "site") ??
+    ready.find((v) => job.script.segments[v.segment].kind === "demo") ??
+    null
+  );
+}
+
+const HOLDING_PROMPT =
+  "Image 1 is a person, image 2 is a product. Recreate image 1 exactly: the same person, face, hair, clothes, room, lighting, framing and camera angle. The only change: they casually hold the product from image 2 in one hand at chest height, tilted toward the camera so it is clearly visible, with a natural grip. Keep it a candid vertical phone selfie. Do not add any text or logos.";
+
+async function stepHolding(job: RenderJob) {
+  const holding = job.holding;
+  if (job.mode !== "actor" || !job.productInHand || holding.skipped || holding.url || !job.actor.url) return;
+  if (!holding.taskId) {
+    const product = productVisual(job);
+    if (!product) {
+      // Wait for a demo image, unless every visual is done and none fits.
+      if (job.visuals.every((v) => v.url)) holding.skipped = true;
+      return;
+    }
+    holding.taskId = await createTask(config.kie.imageEdit, {
+      prompt: HOLDING_PROMPT,
+      image_urls: [job.actor.url, product.url],
+      output_format: "png",
+      aspect_ratio: "9:16",
+    });
+    log(job, "Putting the product in the creator's hand.");
+    return;
+  }
+  const task = await getTask(holding.taskId);
+  if (task.state === "fail") {
+    holding.attempts += 1;
+    holding.taskId = null;
+    if (holding.attempts >= 2) {
+      holding.skipped = true;
+      log(job, `Couldn't put the product in the creator's hand (${task.error}); using the plain portrait.`);
+    }
+    return;
+  }
+  if (task.state === "success") {
+    holding.url = firstUrl(task.urls, "Product-in-hand portrait");
+    log(job, "Creator is now holding the product.");
+  }
+}
+
 async function stepHead(job: RenderJob) {
   if (job.mode !== "actor" || job.head.url || !job.actor.url || !job.voice.url) return;
+  // Wait for the product-in-hand portrait unless it was skipped.
+  const holdingPending = job.productInHand && !job.holding.skipped && !job.holding.url;
+  if (holdingPending) return;
   if (!job.head.taskId) {
     const premium = job.quality === "premium";
     job.head.taskId = await createTask(premium ? config.kie.avatarPremium : config.kie.avatarBudget, {
-      image_url: job.actor.url,
+      image_url: job.holding.url ?? job.actor.url,
       audio_url: job.voice.url,
       prompt: AVATAR_PROMPT,
       ...(premium ? {} : { resolution: "720p" }),
@@ -257,11 +309,27 @@ export function splitForJumpCuts(start: number, end: number, target = 2.2): { st
   return Array.from({ length: parts }, (_, i) => ({ start: start + i * step, end: i === parts - 1 ? end : start + (i + 1) * step }));
 }
 
+// Transitions used where the video moves between the creator and b-roll (or
+// between two b-roll shots); cuts within the creator's footage stay hard.
+const TRANSITIONS = ["smoothleft", "zoomin", "slideup", "smoothright", "circleopen", "slidedown"];
+
 export function buildShots(
   job: RenderJob,
   images: Map<number, string>,
   clips: Map<number, string> = new Map(),
 ): Shot[] {
+  const shots = buildCuts(job, images, clips);
+  let n = 0;
+  shots.forEach((shot, i) => {
+    const prev = shots[i - 1];
+    if (prev && (shot.kind !== "video" || prev.kind !== "video") && shot.end - shot.start > 0.6 && prev.end - prev.start > 0.6) {
+      shot.transition = TRANSITIONS[n++ % TRANSITIONS.length];
+    }
+  });
+  return shots;
+}
+
+function buildCuts(job: RenderJob, images: Map<number, string>, clips: Map<number, string>): Shot[] {
   const segments = job.voice.segments!;
   let punch = false;
   return job.script.segments.flatMap((seg, i): Shot[] => {
@@ -381,6 +449,7 @@ export async function advance(input: RenderJob): Promise<RenderJob> {
       stepTrack(job),
       ...job.visuals.map((v) => stepVisual(job, v).then(() => stepClip(job, v))),
     ]);
+    await stepHolding(job);
     await stepHead(job);
     if (assetsReady(job)) await compose(job);
   } catch (err) {

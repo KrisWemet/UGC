@@ -46,13 +46,13 @@ describe("compose", () => {
       buildComposeArgs({
         shots: [
           { kind: "video", start: 0, end: 2 },
-          { kind: "image", start: 2, end: 4, file: img1 },
-          { kind: "video", start: 4, end: 5.2, zoom: 1.18 },
+          { kind: "image", start: 2, end: 4, file: img1, transition: "smoothleft" },
+          { kind: "video", start: 4, end: 5.2, zoom: 1.18, transition: "zoomin" },
           { kind: "video", start: 5.2, end: 6.5 },
           // Shorter than its slot: the last frame should hold.
-          { kind: "clip", start: 6.5, end: 8, file: clip },
+          { kind: "clip", start: 6.5, end: 8, file: clip, transition: "slideup" },
           { kind: "image", start: 8, end: 8.5, file: img2 },
-          { kind: "video", start: 8.5, end: duration, zoom: 1.18 },
+          { kind: "video", start: 8.5, end: duration, zoom: 1.18, transition: "smoothright" },
         ],
         audioFile: audio,
         musicFile: music,

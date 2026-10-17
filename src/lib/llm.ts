@@ -222,6 +222,7 @@ For every "visual" segment, write imagePrompt: a specific, photorealistic vertic
 onScreenText: for 3-4 of the segments (not the hook), 2-4 punchy words to pop up on screen, like "43G PROTEIN" or "LIMITED TIME"; null for the rest. Use only facts from the brief.
 
 hookText: 2-5 words shown on screen during the hook.
+hookVariants: 2 alternative first lines for A/B testing, each with its own hookText. Make them different kinds of hook (a question, a bold claim, a relatable moment), the same length as the original hook, and follow the same honesty rules.
 actorDescription: physical appearance only (age, gender, ethnicity, hair, casual clothing), written in English, varied across scripts. Even in faceless mode, fill it in.
 caption: a post caption that ends with a disclosure such as "#ad".`,
   });

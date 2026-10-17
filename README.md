@@ -13,6 +13,12 @@ Paste a product URL and get UGC-style short video ads (9:16, 20–30 seconds) fo
    - b-roll stills animated into short clips (Hailuo image-to-video), falling back to a slow zoom if a clip fails
    - pop-up text stickers on key beats ("43G PROTEIN"), TikTok-style captions with numbers in yellow, an on-screen hook and an optional "AI-generated" label
    - an instrumental music bed (Suno) mixed under the voice
+   - transitions (slide, zoom, circle) where the video moves between the creator and b-roll; cuts within the creator's footage stay hard
+   - karaoke captions: the word being spoken turns yellow
+   - the creator holding the product: their portrait is edited (Nano Banana) to hold a real site image or the generated product shot before the talking head is made
+5. **A/B test hooks**: each script comes with 2 alternative opening lines. On a finished video, one click renders a variant that changes only the hook, reusing the creator, b-roll and music.
+
+Rough cost per 25-second AI-creator video on kie.ai: about 310 credits. The talking head (Kling Avatar) is about 190 of that, the three animated b-roll clips 90, music 12, images about 13, voice and scripts under 2. A hook variant costs about 195 (new voice and talking head only).
 
    Animated b-roll and music can be turned off per video to save credits and time.
 

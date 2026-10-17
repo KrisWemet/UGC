@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { newJob, RenderJobSchema } from "@/lib/job";
+import { newJob, RenderJobSchema, variantJob } from "@/lib/job";
 import { advance } from "@/lib/render";
 import { ScriptSchema, VideoModeSchema } from "@/lib/types";
 
@@ -16,10 +16,12 @@ const Body = z.discriminatedUnion("action", [
     aiLabel: z.boolean(),
     motion: z.boolean().optional(),
     music: z.boolean().optional(),
+    productInHand: z.boolean().optional(),
     script: ScriptSchema,
     siteImages: z.array(z.object({ url: z.string().url(), alt: z.string().max(300) })).max(12),
   }),
   z.object({ action: z.literal("advance"), job: RenderJobSchema }),
+  z.object({ action: z.literal("variant"), job: RenderJobSchema, variant: z.number().int().min(0).max(5) }),
 ]);
 
 export async function POST(request: Request) {
@@ -32,6 +34,13 @@ export async function POST(request: Request) {
     }
     const { action: _, ...input } = body;
     return NextResponse.json({ job: await advance(newJob(input)) });
+  }
+  if (body.action === "variant") {
+    const hook = body.job.script.hookVariants[body.variant];
+    if (body.job.status !== "done" || !hook) {
+      return NextResponse.json({ error: "Variants need a finished video and an existing hook variant." }, { status: 400 });
+    }
+    return NextResponse.json({ job: await advance(variantJob(body.job, hook)) });
   }
   return NextResponse.json({ job: await advance(body.job) });
 }

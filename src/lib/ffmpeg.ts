@@ -41,13 +41,18 @@ export async function mediaDuration(file: string): Promise<number> {
   return Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3]);
 }
 
+// transition: an ffmpeg xfade effect into this shot from the previous one
+// (e.g. "smoothleft", "zoomin"). Shots without one hard-cut.
+type ShotBase = { start: number; end: number; transition?: string };
 export type Shot =
   // A slice of the talking-head video. zoom > 1 punches in (jump-cut style).
-  | { start: number; end: number; kind: "video"; zoom?: number }
+  | (ShotBase & { kind: "video"; zoom?: number })
   // A still with a slow push-in.
-  | { start: number; end: number; kind: "image"; file: string }
+  | (ShotBase & { kind: "image"; file: string })
   // An animated b-roll clip, played from its start.
-  | { start: number; end: number; kind: "clip"; file: string };
+  | (ShotBase & { kind: "clip"; file: string });
+
+export const TRANSITION_SECONDS = 0.3;
 
 function escapeFilterPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
@@ -88,7 +93,11 @@ export function buildComposeArgs(opts: {
   const shotLabels: string[] = [];
   let headCursor = 0;
   opts.shots.forEach((shot, i) => {
-    const dur = Math.max(0.1, shot.end - shot.start);
+    // A shot followed by a transition runs TRANSITION_SECONDS longer, because
+    // the transition overlaps it with the next shot. This keeps every shot
+    // starting at its own time, in sync with the voice.
+    const overlap = opts.shots[i + 1]?.transition ? TRANSITION_SECONDS : 0;
+    const dur = Math.max(0.1, shot.end - shot.start) + overlap;
     const label = `s${i}`;
     if (shot.kind === "video") {
       const zoom = shot.zoom ?? 1;
@@ -97,13 +106,13 @@ export function buildComposeArgs(opts: {
       // Punch-ins crop toward the upper middle, where the face is.
       const crop = zoom > 1 ? `,crop=${W}:${H}:(iw-${W})/2:(ih-${H})*0.35` : "";
       filters.push(
-        `[${headLabels[headCursor++]}]trim=start=${shot.start.toFixed(3)}:end=${shot.end.toFixed(3)},setpts=PTS-STARTPTS,fps=${fps},${fill(zw, zh)}${crop},setsar=1[${label}]`,
+        `[${headLabels[headCursor++]}]trim=start=${shot.start.toFixed(3)}:end=${(shot.start + dur).toFixed(3)},setpts=PTS-STARTPTS,fps=${fps},${fill(zw, zh)}${crop},setsar=1,settb=AVTB,format=yuv420p[${label}]`,
       );
     } else if (shot.kind === "clip") {
       inputs.push("-i", shot.file);
       const idx = nextInput++;
       filters.push(
-        `[${idx}:v]tpad=stop_mode=clone:stop_duration=${Math.ceil(dur)},trim=duration=${dur.toFixed(3)},setpts=PTS-STARTPTS,fps=${fps},${fill(W, H)},setsar=1[${label}]`,
+        `[${idx}:v]tpad=stop_mode=clone:stop_duration=${Math.ceil(dur)},trim=duration=${dur.toFixed(3)},setpts=PTS-STARTPTS,fps=${fps},${fill(W, H)},setsar=1,settb=AVTB,format=yuv420p[${label}]`,
       );
     } else {
       inputs.push("-i", shot.file);
@@ -113,13 +122,39 @@ export function buildComposeArgs(opts: {
       const zoom = i % 2 === 0 ? `1+0.12*on/${frames}` : `1.12-0.12*on/${frames}`;
       filters.push(
         `[${idx}:v]${fill(Math.round(W * 1.25), Math.round(H * 1.25))},` +
-          `zoompan=z='${zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${W}x${H}:fps=${fps},setsar=1[${label}]`,
+          `zoompan=z='${zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${W}x${H}:fps=${fps},setsar=1,settb=AVTB,format=yuv420p[${label}]`,
       );
     }
     shotLabels.push(`[${label}]`);
   });
 
-  filters.push(`${shotLabels.join("")}concat=n=${shotLabels.length}:v=1:a=0[cat]`);
+  // Hard-cut runs of shots are concatenated into groups; groups are joined
+  // with xfade transitions.
+  const groups: { labels: string[]; start: number }[] = [];
+  opts.shots.forEach((shot, i) => {
+    if (i === 0 || shot.transition) groups.push({ labels: [], start: shot.start });
+    groups[groups.length - 1].labels.push(shotLabels[i]);
+  });
+  const groupLabels = groups.map((g, gi) => {
+    if (g.labels.length === 1) return g.labels[0];
+    filters.push(`${g.labels.join("")}concat=n=${g.labels.length}:v=1:a=0[g${gi}]`);
+    return `[g${gi}]`;
+  });
+  let current = groupLabels[0];
+  const origin = opts.shots[0]?.start ?? 0;
+  groups.slice(1).forEach((g, k) => {
+    const shotIndex = opts.shots.findIndex((s) => s.start === g.start && s.transition);
+    const effect = opts.shots[shotIndex]?.transition ?? "fade";
+    // The previous group was extended by TRANSITION_SECONDS, so starting the
+    // transition at this group's own start time keeps it on schedule.
+    const offset = g.start - origin;
+    const out = `[x${k}]`;
+    filters.push(
+      `${current}${groupLabels[k + 1]}xfade=transition=${effect}:duration=${TRANSITION_SECONDS}:offset=${offset.toFixed(3)}${out}`,
+    );
+    current = out;
+  });
+  filters.push(`${current}null[cat]`);
   filters.push(
     `[cat]ass='${escapeFilterPath(opts.assFile)}':fontsdir='${escapeFilterPath(opts.fontsDir)}',format=yuv420p[out]`,
   );
