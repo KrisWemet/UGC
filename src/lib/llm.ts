@@ -2,7 +2,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
 import { config, requireEnv } from "./config";
-import { openRouterJson, usingOpenRouter } from "./openrouter";
+import { kieClaudeJson } from "./kie-claude";
+import { openRouterJson } from "./openrouter";
 import type { ScrapedSite } from "./scrape";
 import {
   ProductBriefSchema,
@@ -18,8 +19,28 @@ import {
 let anthropic: Anthropic | null = null;
 const client = () => (anthropic ??= new Anthropic({ apiKey: requireEnv("ANTHROPIC_API_KEY") }));
 
-// One structured-output call, on Claude when ANTHROPIC_API_KEY is set and on
-// a free OpenRouter model otherwise.
+// Which LLM writes the brief and scripts:
+// - "anthropic": Claude on Anthropic's API, with web search and structured outputs
+// - "kie": Claude through kie.ai on kie.ai credits (site content only)
+// - "openrouter": free OpenRouter models (site content only)
+// LLM_PROVIDER picks one; otherwise the first with a key, in that order.
+type Provider = "anthropic" | "kie" | "openrouter";
+
+export function llmProviders(): Provider[] {
+  const available: Provider[] = [];
+  if (process.env.ANTHROPIC_API_KEY) available.push("anthropic");
+  if (process.env.KIE_API_KEY) available.push("kie");
+  if (process.env.OPENROUTER_API_KEY) available.push("openrouter");
+  const preferred = process.env.LLM_PROVIDER as Provider | undefined;
+  if (preferred && available.includes(preferred)) {
+    return [preferred, ...available.filter((p) => p !== preferred)];
+  }
+  if (available.length === 0) throw new Error("Set ANTHROPIC_API_KEY, KIE_API_KEY or OPENROUTER_API_KEY. See .env.example.");
+  return available;
+}
+
+// One structured-output call. If the first provider fails (outage, bad
+// output), the next one with a key gets a turn.
 async function structured<T extends z.ZodType>(opts: {
   schema: T;
   system: string;
@@ -27,7 +48,28 @@ async function structured<T extends z.ZodType>(opts: {
   effort: "medium" | "high";
   step: string;
 }): Promise<z.infer<T>> {
-  if (usingOpenRouter()) return openRouterJson(opts.schema, opts.system, opts.user);
+  const providers = llmProviders();
+  let lastError: unknown;
+  for (const provider of providers) {
+    try {
+      if (provider === "kie") return await kieClaudeJson(opts.schema, opts.system, opts.user);
+      if (provider === "openrouter") return await openRouterJson(opts.schema, opts.system, opts.user);
+      return await anthropicStructured(opts);
+    } catch (err) {
+      lastError = err;
+      console.error(`${provider} failed on the ${opts.step} step:`, err);
+    }
+  }
+  throw lastError;
+}
+
+async function anthropicStructured<T extends z.ZodType>(opts: {
+  schema: T;
+  system: string;
+  user: string;
+  effort: "medium" | "high";
+  step: string;
+}): Promise<z.infer<T>> {
   const response = await client().beta.messages.parse({
     model: config.claudeModel,
     max_tokens: 16000,
@@ -114,9 +156,10 @@ async function synthesizeBrief(site: ScrapedSite, notes: string): Promise<Produc
 }
 
 export async function researchProduct(site: ScrapedSite): Promise<Research> {
-  // Web search needs Claude's server-side tool; free OpenRouter models get the
+  // Web search needs Anthropic's server-side tool; the other providers get the
   // site content only.
-  const research = usingOpenRouter() ? Promise.resolve({ notes: "", sources: [] as Source[] }) : webResearch(site);
+  const research =
+    llmProviders()[0] === "anthropic" ? webResearch(site) : Promise.resolve({ notes: "", sources: [] as Source[] });
   const { notes, sources } = await research.catch((err) => {
     // Web research is a bonus; the site content alone can still produce a brief.
     console.error("web research failed, continuing with site content only:", err);
@@ -159,7 +202,8 @@ Voice: a real person casually sharing a find with a friend. Contractions, short 
 Honesty rules (these ads must comply with FTC and Competition Bureau guidance):
 - The speaker is a creator presenting the product, not a customer giving a testimonial. Never claim personal results, long-term use, or "I've been using this for months".
 - Only state facts from the brief's verifiableClaims, keyFeatures or pricing. No invented numbers.
-- No fake urgency (no invented discounts or deadlines).`,
+- No fake urgency (no invented discounts or deadlines).
+- Never claim or imply a partnership, sponsorship or official relationship with the brand (no "#partner", "#ambassador", "official" wording) unless the brief says one exists.`,
     user: `<brief>\n${JSON.stringify(research.brief, null, 2)}\n</brief>
 
 <site_images>\n${imageList}\n</site_images>
@@ -197,5 +241,9 @@ export function normalizeScript(script: Script, mode: VideoMode, imageCount: num
       return { ...s, shot, imagePrompt, siteImageIndex: shot === "visual" ? siteImageIndex : null };
     });
   if (segments.length === 0) throw new Error(`Script "${script.title}" has no narration.`);
-  return { ...script, segments };
+  // Belt and braces for the partnership rule above.
+  const affiliation = /#\w*(partner|sponsor|ambassador|official)\w*/gi;
+  const hashtags = script.hashtags.filter((h) => !h.match(affiliation));
+  const caption = script.caption.replace(affiliation, "").replace(/\s{2,}/g, " ").trim();
+  return { ...script, segments, hashtags, caption };
 }

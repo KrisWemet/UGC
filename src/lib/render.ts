@@ -8,11 +8,15 @@ import type { RenderJob } from "./job";
 import { createTask, getTask } from "./kie";
 import { downloadBuffer, safeFetch } from "./safe-fetch";
 import { storeVideo } from "./storage";
+import { fallbackGeminiVoice, parseVoice } from "./voices";
 import { estimateWordTimings, joinNarration, parseWordTimestamps, segmentTimings } from "./timing";
 
 // Advances a render job by one step: starts tasks that are ready to start,
 // polls running ones, and composes the final video once every asset exists.
 // Each call is short except the final compose, so it fits serverless limits.
+
+const VOICE_STYLE =
+  "A real person in their twenties casually telling a friend about something they just found, speaking to their phone camera. Natural, upbeat and quick, with genuine enthusiasm; not an announcer.";
 
 const AVATAR_PROMPT =
   "A natural UGC creator talking to the camera in a casual home setting. Relaxed, expressive, subtle hand gestures and head movement, natural blinking, steady eye contact.";
@@ -42,21 +46,35 @@ function firstUrl(urls: string[], what: string): string {
 
 async function stepVoice(job: RenderJob) {
   const { text, wordStarts, wordCount } = joinNarration(job.script.segments);
+  const { provider, voice } = parseVoice(job.voiceId);
   if (!job.voice.taskId) {
-    job.voice.taskId = await createTask(config.kie.tts, {
-      text,
-      voice: job.voiceId,
-      stability: 0.45,
-      similarity_boost: 0.75,
-      style: 0.35,
-      speed: 1.05,
-      timestamps: true,
-    });
-    log(job, "Voiceover started.");
+    job.voice.taskId =
+      provider === "gemini"
+        ? await createTask(config.kie.geminiTts, {
+            speakers: [{ speaker_id: "Speaker 1", voice_name: voice }],
+            dialogue_turns: [{ speaker_id: "Speaker 1", style: VOICE_STYLE, text }],
+          })
+        : await createTask(config.kie.tts, {
+            text,
+            voice,
+            stability: 0.45,
+            similarity_boost: 0.75,
+            style: 0.35,
+            speed: 1.05,
+            timestamps: true,
+          });
+    log(job, `Voiceover started (${provider === "gemini" ? "Google" : "ElevenLabs"} ${voice}).`);
     return;
   }
   if (job.voice.url) return;
   const task = await getTask(job.voice.taskId);
+  if (task.state === "fail" && provider === "elevenlabs") {
+    // ElevenLabs on kie.ai has outages; switch to a Google voice instead of failing.
+    job.voiceId = fallbackGeminiVoice(job.script.actorDescription);
+    job.voice.taskId = null;
+    log(job, `ElevenLabs voiceover failed (${task.error}); switching to Google voice ${parseVoice(job.voiceId).voice}.`);
+    return;
+  }
   if (task.state === "fail") return retryOrFail(job, job.voice, "Voiceover", task.error);
   if (task.state !== "success") return;
 
@@ -66,7 +84,7 @@ async function stepVoice(job: RenderJob) {
 
   const dir = await mkdtemp(path.join(tmpdir(), "ugc-voice-"));
   try {
-    const file = path.join(dir, "voice.mp3");
+    const file = path.join(dir, "voice.audio");
     await writeFile(file, await downloadBuffer(audioUrl, 50 * 1024 * 1024));
     const duration = await mediaDuration(file);
     const parsed = parseWordTimestamps(task.result);
@@ -119,7 +137,12 @@ async function stepHead(job: RenderJob) {
     return;
   }
   const task = await getTask(job.head.taskId);
-  if (task.state === "fail") return retryOrFail(job, job.head, "Talking-head video", task.error);
+  if (task.state === "fail") {
+    retryOrFail(job, job.head, "Talking-head video", task.error);
+    // kie.ai models have separate outages, so retry on the other avatar model.
+    job.quality = job.quality === "premium" ? "budget" : "premium";
+    return;
+  }
   if (task.state === "success") {
     job.head.url = firstUrl(task.urls, "Talking-head video");
     log(job, "Talking-head video ready.");
@@ -178,7 +201,7 @@ async function compose(job: RenderJob) {
   const dir = await mkdtemp(path.join(tmpdir(), "ugc-render-"));
   try {
     log(job, "Composing the final video...");
-    const audioFile = path.join(dir, "voice.mp3");
+    const audioFile = path.join(dir, "voice.audio");
     await writeFile(audioFile, await downloadBuffer(job.voice.url!, 50 * 1024 * 1024));
 
     let talkingHeadFile: string | undefined;

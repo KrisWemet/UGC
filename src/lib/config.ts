@@ -3,10 +3,13 @@
 
 export const config = {
   claudeModel: process.env.CLAUDE_MODEL ?? "claude-opus-5-5",
+  // Claude model when served through kie.ai (see src/lib/kie-claude.ts).
+  kieClaudeModel: process.env.KIE_CLAUDE_MODEL ?? "claude-opus-5-5",
   kie: {
     apiBase: "https://api.kie.ai",
     uploadBase: "https://kieai.redpandaai.co",
     tts: process.env.KIE_TTS_MODEL ?? "elevenlabs/text-to-speech-multilingual-v2",
+    geminiTts: process.env.KIE_GEMINI_TTS_MODEL ?? "google/gemini-3-8-flash-tts",
     image: process.env.KIE_IMAGE_MODEL ?? "seedream/5-flash-text-to-image",
     // "premium" talking head (Kling Avatar) and "budget" (Infinitalk).
     avatarPremium: process.env.KIE_AVATAR_MODEL ?? "kling/ai-avatar-standard",

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ScriptSchema, VideoModeSchema } from "./types";
+import { resolveVoice } from "./voices";
 
 // A render job is plain JSON that the browser keeps and sends back on every
 // step, so the server stays stateless and a page reload can resume a job.
@@ -54,6 +55,7 @@ export function newJob(input: {
   return {
     id: crypto.randomUUID(),
     ...input,
+    voiceId: resolveVoice(input.voiceId, input.script.actorDescription),
     status: "running",
     error: null,
     log: [],

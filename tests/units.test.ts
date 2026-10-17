@@ -131,3 +131,40 @@ describe("render job", () => {
     expect(shots[1]).toMatchObject({ start: 2, end: 5, file: "/tmp/img.jpg" });
   });
 });
+
+describe("voices", async () => {
+  const { parseVoice, fallbackGeminiVoice } = await import("@/lib/voices");
+  it("parses provider prefixes and treats bare IDs as ElevenLabs", () => {
+    expect(parseVoice("gemini:Zephyr")).toEqual({ provider: "gemini", voice: "Zephyr" });
+    expect(parseVoice("elevenlabs:abc")).toEqual({ provider: "elevenlabs", voice: "abc" });
+    expect(parseVoice("kPzsL2i3teMYv0FxEYQ6")).toEqual({ provider: "elevenlabs", voice: "kPzsL2i3teMYv0FxEYQ6" });
+  });
+  it("picks a fallback voice by the creator's gender", () => {
+    expect(fallbackGeminiVoice("a 28-year-old woman with curly hair")).toBe("gemini:Zephyr");
+    expect(fallbackGeminiVoice("a 30 year old man in a hoodie")).toBe("gemini:Puck");
+  });
+});
+
+describe("json replies", async () => {
+  const { extractJson, jsonReply } = await import("@/lib/json-reply");
+  const { z } = await import("zod");
+  it("extracts JSON from fenced or chatty replies", () => {
+    expect(extractJson('```json\n{"a":1}\n```')).toEqual({ a: 1 });
+    expect(extractJson('Sure! {"a":2} Hope that helps.')).toEqual({ a: 2 });
+  });
+  it("retries once with the validation error", async () => {
+    const replies = ['{"word": 5}', '{"word": "joy"}'];
+    const seen: number[] = [];
+    const result = await jsonReply(
+      async (_system, messages) => {
+        seen.push(messages.length);
+        return replies.shift()!;
+      },
+      z.object({ word: z.string() }),
+      "system",
+      "user",
+    );
+    expect(result).toEqual({ word: "joy" });
+    expect(seen).toEqual([1, 3]);
+  });
+});
