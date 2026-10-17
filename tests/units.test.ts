@@ -66,6 +66,19 @@ describe("timing", () => {
   });
 });
 
+describe("segment alignment", () => {
+  it("snaps boundaries to the segment's first word when word splits differ", () => {
+    // Narration counts "fast-food" as one word; the transcript splits it.
+    const words = ["Most", "fast", "food", "lunches", "feel", "heavy.", "Grilled", "chicken", "is", "back."].map((w, i) => ({
+      word: w,
+      start: i,
+      end: i + 0.9,
+    }));
+    const segs = segmentTimings(words, [0, 5], 9, 10, ["Most", "Grilled"]);
+    expect(segs[1].start).toBe(6);
+  });
+});
+
 describe("captions", () => {
   it("chunks words and breaks at punctuation", () => {
     const words = estimateWordTimings("Okay so. I found this tool today", 4);

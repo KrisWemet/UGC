@@ -8,6 +8,7 @@ import type { RenderJob } from "./job";
 import { createTask, getTask } from "./kie";
 import { downloadBuffer, safeFetch } from "./safe-fetch";
 import { storeVideo } from "./storage";
+import { whisperAlignEnabled, whisperWords } from "./align";
 import { fallbackGeminiVoice, parseVoice } from "./voices";
 import { estimateWordTimings, joinNarration, parseWordTimestamps, segmentTimings } from "./timing";
 
@@ -87,14 +88,26 @@ async function stepVoice(job: RenderJob) {
     const file = path.join(dir, "voice.audio");
     await writeFile(file, await downloadBuffer(audioUrl, 50 * 1024 * 1024));
     const duration = await mediaDuration(file);
-    const parsed = parseWordTimestamps(task.result);
+    let parsed = parseWordTimestamps(task.result);
+    if (!parsed && whisperAlignEnabled()) {
+      parsed = await whisperWords(file).catch((err) => {
+        log(job, `Whisper alignment failed (${err instanceof Error ? err.message : err}); estimating caption timing.`);
+        return null;
+      });
+    }
     const words = parsed ?? estimateWordTimings(text, duration);
     job.voice = {
       ...job.voice,
       url: audioUrl,
       duration,
       words,
-      segments: segmentTimings(words, wordStarts, wordCount, duration),
+      segments: segmentTimings(
+        words,
+        wordStarts,
+        wordCount,
+        duration,
+        job.script.segments.map((seg) => seg.narration.trim().split(/\s+/)[0] ?? ""),
+      ),
       timestampsEstimated: !parsed,
     };
     log(job, `Voiceover ready (${duration.toFixed(1)}s${parsed ? "" : ", caption timing estimated"}).`);

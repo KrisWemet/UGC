@@ -89,19 +89,34 @@ export function estimateWordTimings(text: string, duration: number): WordTiming[
   });
 }
 
-// Segment boundaries from word timings. If the provider's word count differs
-// from ours (it may split or merge tokens), scale the indices proportionally.
+const norm = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+// Segment boundaries from word timings. The provider (or Whisper) may split or
+// merge words differently from our narration ("fast-food" vs "fast food"), so
+// the expected index is scaled by the word-count ratio and then snapped to the
+// nearest word matching the segment's first word.
 export function segmentTimings(
   words: WordTiming[],
   wordStarts: number[],
   wordCount: number,
   duration: number,
+  firstWords: string[] = [],
 ): SegmentTiming[] {
   const scale = words.length / Math.max(wordCount, 1);
   const starts = wordStarts.map((idx, i) => {
     if (i === 0) return 0;
-    const w = words[Math.min(words.length - 1, Math.round(idx * scale))];
-    return w ? w.start : 0;
+    let at = Math.min(words.length - 1, Math.round(idx * scale));
+    const target = firstWords[i] ? norm(firstWords[i]) : "";
+    if (target) {
+      for (let d = 0; d <= 4; d++) {
+        const hit = [at - d, at + d].find((j) => j >= 0 && j < words.length && norm(words[j].word) === target);
+        if (hit !== undefined) {
+          at = hit;
+          break;
+        }
+      }
+    }
+    return words[at]?.start ?? 0;
   });
   return starts.map((start, i) => ({ start, end: i + 1 < starts.length ? starts[i + 1] : duration }));
 }
